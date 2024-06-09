@@ -31,7 +31,14 @@ maintainers = [
 ]
 
 dependencies = [
-    "rdkit"
+    "hyperopt",
+    "loguru",
+    "numpy",
+    "pandas",
+    "rdkit",
+    "shap",
+    "scikit-learn",
+    "xgboost"
 ]
 
 # List additional groups of dependencies here (e.g. development
@@ -44,5 +51,10 @@ dependencies = [
 # referred to as "extras". For a more extensive definition see:
 # https://packaging.python.org/en/latest/specifications/dependency-specifiers/#extras
 [project.optional-dependencies]
-dev = ["check-manifest"]
+dev = [
+
+    "check-manifest",
+    "pytest",
+    "ruff"
+]
 test = ["coverage"]

@@ -20,7 +20,9 @@ def sanitise_smiles(smiles: str, as_mol=False) -> str | Chem.Mol | None:
         return None
 
 
-def featurise_smiles(smiles: list[str], fp_generator: rdFingerprintGenerator, sanitise: bool = False) -> pd.DataFrame:
+def featurise_smiles(
+        smiles: list[str], fp_generator: rdFingerprintGenerator, sanitise: bool = False
+) -> pd.DataFrame:
     logger.info(f"Featurising {len(smiles)} SMILES")
 
     # Generate features
@@ -36,10 +38,14 @@ def featurise_smiles(smiles: list[str], fp_generator: rdFingerprintGenerator, sa
             DataStructs.ConvertToNumpyArray(fps, array)
             features.append(array)
 
-    return pd.DataFrame(features, columns=[i for i in range(len(features[0]))], index=smiles)
+    return pd.DataFrame(
+        features, columns=[i for i in range(len(features[0]))], index=smiles
+    )
 
 
-def _process_atom_pair_bits(info: dict[int, tuple[tuple[int, int]]]) -> dict[int, set[int]]:
+def _process_atom_pair_bits(
+        info: dict[int, tuple[tuple[int, int]]],
+) -> dict[int, set[int]]:
     """
 
     :param info:
@@ -68,5 +74,5 @@ def get_bit_atom_map(mol: Chem.Mol, fp_generator: rdFingerprintGenerator):
     fp_gen_type = fp_generator.GetOptions().__str__()
 
     # Process bit-atom map
-    if 'AtomPair' in fp_gen_type:
+    if "AtomPair" in fp_gen_type:
         return _process_atom_pair_bits(info=info)
