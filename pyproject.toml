@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+
+[project]
+name = "ml-for-malaria"
+version = "0.1.0"
+description = "ML applied for Malaria"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "MIT License" }
+keywords = ["machine learning", "malaria", "haemozoin"]
+
+authors = [
+    { name = "David Kuter" }
+]
+maintainers = [
+    { name = "David Kuter" }
+]
+
+dependencies = [
+    "datamol",
+    "hyperopt",
+    "loguru",
+    "matplotlib",
+    "numpy",
+    "pandas",
+    "rdkit>=2024.3.5",
+    "shap",
+    "scikit-learn",
+    "xgboost"
+]
+
+[project.optional-dependencies]
+dev = [
+
+    "check-manifest",
+    "pytest",
+    "ruff"
+]
+test = ["coverage"]
+
+[tool.setuptools.packages.find]
+where = ["."]
