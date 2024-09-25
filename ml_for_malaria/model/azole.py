@@ -6,8 +6,9 @@ from loguru import logger
 from rdkit import Chem
 from rdkit.Chem import rdFingerprintGenerator
 from rdkit.Chem.Draw import SimilarityMaps
-from train.featurisation import featurise_smiles, sanitise_smiles, get_bit_atom_map
 from xgboost import XGBClassifier
+
+from ml_for_malaria.train.featurization import featurise_smiles, sanitise_smiles, get_bit_atom_map
 
 
 class AzoleModel:

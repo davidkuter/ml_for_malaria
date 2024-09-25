@@ -31,11 +31,13 @@ maintainers = [
 ]
 
 dependencies = [
+    "datamol",
     "hyperopt",
     "loguru",
+    "matplotlib",
     "numpy",
     "pandas",
-    "rdkit",
+    "rdkit>=2024.3.5",
     "shap",
     "scikit-learn",
     "xgboost"
@@ -58,3 +60,6 @@ dev = [
     "ruff"
 ]
 test = ["coverage"]
+
+[tool.setuptools.packages.find]
+where = ["."]

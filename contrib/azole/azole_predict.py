@@ -1,9 +1,9 @@
 import pandas as pd
 
-from model.azole import AzoleModel
+from ml_for_malaria.model.azole import AzoleModel
 
-data_path = "./data/100nM_Experimental_Azoles.csv"
-model_path = "azole_model.ubj"
+data_path = "../azole_prediction/data/100nM_Experimental_Azoles.csv"
+model_path = "../azole_prediction/azole_model.ubj"
 out_path = "./azole_results.csv"
 
 df = pd.read_csv(data_path)

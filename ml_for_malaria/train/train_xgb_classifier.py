@@ -18,7 +18,7 @@ from sklearn.metrics import classification_report
 from sklearn.model_selection import train_test_split
 from xgboost import XGBClassifier
 
-from .featurisation import featurise_smiles, sanitise_smiles
+from ml_for_malaria.train.featurization import featurise_smiles, sanitise_smiles
 
 
 def prepare_data(
