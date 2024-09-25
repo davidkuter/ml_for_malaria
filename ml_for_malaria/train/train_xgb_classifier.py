@@ -18,7 +18,7 @@ from sklearn.metrics import classification_report
 from sklearn.model_selection import train_test_split
 from xgboost import XGBClassifier
 
-from ml_for_malaria.train.featurization import featurise_smiles, sanitise_smiles
+from ml_for_malaria.train.featurization import featurize_smiles, sanitize_smiles
 
 
 def prepare_data(
@@ -29,31 +29,33 @@ def prepare_data(
         sanitise: bool = False,
 ) -> tuple:
     """
+    Prepare data for training. This function will featurize the SMILES strings and split the data into training and
+    testing sets. It will also convert the data into DMatrix format for XGBoost.
 
-    :param df:
-    :param generator:
-    :param seed:
-    :param test_size:
-    :param sanitise:
-    :return:
+    :param df: A dataframe containing 2 columns: SMILES, LABEL
+    :param generator: RDKit fingerprint generator
+    :param seed: Random seed
+    :param test_size: Proportion of data to use for testing
+    :param sanitise: Boolean flag, if True sanitise the SMILES strings
+    :return: Tuple containing DMatrix for training, DMatrix for testing, features, labels, training features,
     """
     logger.info("Preparing data for training")
     # Generate fingerprints
-    X = featurise_smiles(
-        smiles=df["SMILES"].to_list(), fp_generator=generator, sanitise=sanitise
+    x = featurize_smiles(
+        smiles=df["SMILES"].to_list(), fp_generator=generator, sanitize=sanitise
     )
     y = df["LABEL"].to_list()
 
     # Prepare train/test split
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=test_size, random_state=seed
+    x_train, x_test, y_train, y_test = train_test_split(
+        x, y, test_size=test_size, random_state=seed
     )
 
     # Format train/test split into DMatrix to improve runtime performance
-    dtrain = xgb.DMatrix(data=X_train, label=y_train)
-    dtest = xgb.DMatrix(data=X_test, label=y_test)
+    dtrain = xgb.DMatrix(data=x_train, label=y_train)
+    dtest = xgb.DMatrix(data=x_test, label=y_test)
 
-    return dtrain, dtest, X, y, X_train, y_train, X_test, y_test
+    return dtrain, dtest, x, y, x_train, y_train, x_test, y_test
 
 
 def hyperparameterisation(params: dict) -> dict:
@@ -81,12 +83,14 @@ def hyperparameterisation(params: dict) -> dict:
     return {"loss": -1 * auc, "status": STATUS_OK}
 
 
-def train_cross_validation_model(dtrain: xgb.DMatrix, seed: int):
+def train_cross_validation_model(dtrain: xgb.DMatrix, seed: int) -> tuple[dict, float]:
     """
+    Perform hyperparameter optimisation using hyperopt. We use the TPE algorithm to find the best hyperparameters
+    for our model.
 
-    :param dtrain:
-    :param seed:
-    :return:
+    :param dtrain: Training data in DMatrix format
+    :param seed: Random seed
+    :return: Tuple containing the best hyperparameters and the loss
     """
     logger.info("Hyperparameter optimisation")
 
@@ -125,7 +129,16 @@ def train_cross_validation_model(dtrain: xgb.DMatrix, seed: int):
     return best_hyperparams, -1 * loss["loss"]
 
 
-def feature_importance(xgb_clf, X: xgb.DMatrix, out_dir: Path):
+def feature_importance(xgb_clf, x: xgb.DMatrix, out_dir: Path):
+    """
+    Perform feature importance analysis using SHAP values. We will save the feature importance as a CSV file and
+    plot the feature importance.
+
+    :param xgb_clf: XGBoost classifier
+    :param x: DMatrix containing the features
+    :param out_dir: Output directory
+    :return:
+    """
     # Get feature importance
     feat_import = xgb_clf.get_booster().get_score(importance_type="weight")
     feat_import = pd.DataFrame.from_dict(
@@ -145,53 +158,37 @@ def feature_importance(xgb_clf, X: xgb.DMatrix, out_dir: Path):
     # SHAP analysis
     explainer = shap.Explainer(xgb_clf)
     shap_file = out_dir / "shap.csv"
-    shap_values_raw = explainer.shap_values(X)
+    shap_values_raw = explainer.shap_values(x)
     shap_values = pd.DataFrame(shap_values_raw)
     shap_values.to_csv(shap_file)
 
     fig = plt.figure()
     shap.plots.force(
-        explainer.expected_value, shap_values_raw[0], X.iloc[0], show=False
+        explainer.expected_value, shap_values_raw[0], x.iloc[0], show=False
     )
     fig.savefig(shap_file.as_posix().replace(".csv", ".png"), bbox_inches="tight")
-
-    # We need to predict
-    # shap_values['PREDICTION'] = xgb_clf.predict(X)
-    #
-    # shap_final = pd.DataFrame(index=[n for n in range(0, len(shap_values.columns))])
-    # for i in [0, 1]:
-    #     label = 'ACTIVE' if i == 1 else 'INACTIVE'
-    #     temp = shap_values[shap_values['PREDICTION'] == i]
-    #     temp = temp.drop(columns=['PREDICTION'])
-    #     temp = temp.median().to_frame(name=f'{label}_SHAP_VALUES')
-    #     # - Normalize SHAP values
-    #     shap_max = temp[f'{label}_SHAP_VALUES'].abs().max()
-    #     temp[f'{label}_SHAP_VALUES_NORM'] = temp[f'{label}_SHAP_VALUES'] / shap_max
-    #     shap_final = shap_final.merge(temp, left_index=True, right_index=True)
-    #
-    # # - Format output
-    # shap_final.index.name = 'FEATURE'
-    # shap_final.to_csv(shap_file)
 
 
 def train_classifier(
         df: pd.DataFrame, model_outpath: str, seed: int = 42, save_features: bool = False
-):
+) -> XGBClassifier:
     """
+    Main entry point for training a XGBoost classifier. This function will perform hyperparameter optimisation
+    on a set of fingerprints and train a model using the best fingerprint. The model will be saved to disk.
 
-    :param df: A dataframe of 2 columns: SMILES, LABEL
-    :param model_outpath:
-    :param seed:
-    :param save_features:
-    :return:
+    :param df: A dataframe containing 2 columns: SMILES, LABEL
+    :param model_outpath: Output path for the model
+    :param seed: Random seed
+    :param save_features: Boolean flag, if True save feature importance
+    :return: XGBoost classifier
     """
     # Sanitize SMILES
     df = df.rename(columns={"SMILES": "INPUT_SMILES"})
-    df["SMILES"] = df["INPUT_SMILES"].apply(lambda x: sanitise_smiles(x, as_mol=False))
+    df["SMILES"] = df["INPUT_SMILES"].apply(lambda x: sanitize_smiles(x, as_mol=False))
     df = df.dropna(subset=["SMILES"])
     df = df.drop_duplicates(subset=["SMILES"])
 
-    # Set featurisation routines
+    # Set featurization routines
     fp_size = 2048
     feature_set = {
         "Morgan2Bits": GetMorganGenerator(radius=2, fpSize=fp_size),
@@ -213,7 +210,7 @@ def train_classifier(
         logger.info(f"Evaluating {feature_name}")
 
         # Generate Train/Test splits
-        dtrain, _, X, y, X_train, y_train, X_test, y_test = prepare_data(
+        dtrain, _, x, y, x_train, y_train, x_test, y_test = prepare_data(
             df=df, generator=generator, seed=seed
         )
 
@@ -224,30 +221,30 @@ def train_classifier(
         best_results[feature_name] = {"loss": loss, "params": best_hyperparams}
 
     # Find feature set that has the best loss and use that to create a model
-    best_features = max(best_results.keys(), key=lambda x: best_results[x]["loss"])
+    best_features = max(best_results.keys(), key=lambda i: best_results[i]["loss"])
     auc = best_results[best_features]["loss"]
     params = best_results[best_features]["params"]
     logger.info(f"Best Features are: {best_features}. AUC: {auc}")
     logger.info(f"Params: {params}")
 
     # Regenerate training data
-    dtrain, _, X, y, X_train, y_train, X_test, y_test = prepare_data(
+    dtrain, _, x, y, x_train, y_train, x_test, y_test = prepare_data(
         df=df, generator=feature_set[best_features], seed=seed
     )
 
     # instantiate the classifier
     logger.info("Validating Model")
     xgb_clf = XGBClassifier(**params)
-    xgb_clf.fit(X_train, y_train)
+    xgb_clf.fit(x_train, y_train)
 
     # Make predictions on test data
-    y_pred = xgb_clf.predict(X_test)
+    y_pred = xgb_clf.predict(x_test)
     clf_report = classification_report(y_test, y_pred.tolist(), output_dict=True)
     logger.info(f'Model accuracy score: {round(clf_report["accuracy"], 3)}')
     logger.info(f'Classification report: {clf_report["weighted avg"]}')
 
     # Train model on full dataset
-    xgb_clf.fit(X, y)
+    xgb_clf.fit(x, y)
 
     # Save full model
     xgb_clf.save_model(f"{model_outpath}.ubj")
@@ -255,6 +252,6 @@ def train_classifier(
     # Show feature importance
     if save_features:
         out_dir = Path(model_outpath).parents[0]
-        feature_importance(xgb_clf=xgb_clf, X=X, out_dir=out_dir)
+        feature_importance(xgb_clf=xgb_clf, x=x, out_dir=out_dir)
 
     return xgb_clf

@@ -4,17 +4,6 @@ build-backend = "setuptools.build_meta"
 
 
 [project]
-# This is the name of your project. The first time you publish this
-# package, this name will be registered for you. It will determine how
-# users can install this project, e.g.:
-#
-# $ pip install sampleproject
-#
-# And where it will live on PyPI: https://pypi.org/project/sampleproject/
-#
-# There are some restrictions on what makes a valid project name
-# specification here:
-# https://packaging.python.org/specifications/core-metadata/#name
 name = "ml-for-malaria"
 version = "0.1.0"
 description = "ML applied for Malaria"
@@ -43,15 +32,6 @@ dependencies = [
     "xgboost"
 ]
 
-# List additional groups of dependencies here (e.g. development
-# dependencies). Users will be able to install these using the "extras"
-# syntax, for example:
-#
-#   $ pip install sampleproject[dev]
-#
-# Optional dependencies the project provides. These are commonly
-# referred to as "extras". For a more extensive definition see:
-# https://packaging.python.org/en/latest/specifications/dependency-specifiers/#extras
 [project.optional-dependencies]
 dev = [
 
