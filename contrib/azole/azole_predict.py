@@ -1,18 +1,20 @@
+from pathlib import Path
+
 import pandas as pd
 
-from ml_for_malaria.model.azole import AzoleModel
+from ml_for_malaria.model import XGBFingerprintClassifier
 
-data_path = "../azole_prediction/data/100nM_Experimental_Azoles.csv"
-model_path = "../azole_prediction/azole_model.ubj"
-out_path = "./azole_results.csv"
+ROOT = Path(__file__).resolve().parents[2]
+DATA_PATH = ROOT / "data" / "azole" / "100nM_Experimental_Azoles.csv"
+OUTDIR = ROOT / "runs" / "azole_100nM"
+RESULTS_PATH = Path(__file__).resolve().parent / "azole_results.csv"
 
-df = pd.read_csv(data_path)
+df = pd.read_csv(DATA_PATH)
 df = df.rename(columns={"Smiles": "SMILES"})
 
-model = AzoleModel()
-model.load_model(model_path=model_path)
+model = XGBFingerprintClassifier.load(OUTDIR)
 df_results = model.predict(smiles=df["SMILES"].to_list())
 df = df.merge(df_results, on="SMILES", how="left")
 df = df.sort_values(by=["PROBABILITY"], ascending=False)
-df.to_csv(out_path, index=False)
+df.to_csv(RESULTS_PATH, index=False)
 print(df)

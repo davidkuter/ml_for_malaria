@@ -1,257 +1,383 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
 from pathlib import Path
 
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import shap
 import xgboost as xgb
-from hyperopt import hp, STATUS_OK, Trials, fmin, tpe
+from hyperopt import STATUS_OK, Trials, fmin, hp, tpe
 from loguru import logger
-from rdkit.Chem import rdFingerprintGenerator
-from rdkit.Chem.rdFingerprintGenerator import (
-    GetMorganGenerator,
-    GetMorganFeatureAtomInvGen,
-    GetRDKitFPGenerator,
-    GetAtomPairGenerator,
-)
-from sklearn.metrics import classification_report
-from sklearn.model_selection import train_test_split
 from xgboost import XGBClassifier
 
-from ml_for_malaria.train.featurization import featurize_smiles, sanitize_smiles
+from ml_for_malaria.model.xgb_classifier import ARCHITECTURE, XGBFingerprintClassifier
+from ml_for_malaria.train.checkpoints import RunCheckpointer, data_hash, to_jsonable
+from ml_for_malaria.train.featurization import (
+    DEFAULT_FP_SIZE,
+    clean_training_data,
+    featurize_smiles,
+    get_fingerprint_generator,
+    get_fingerprint_generators,
+)
+from ml_for_malaria.train.report import build_report, compute_test_metrics, write_report
+from ml_for_malaria.train.split import get_splitter
+
+NUM_BOOST_ROUND = 1000
+EARLY_STOPPING_ROUNDS = 20
+HYPEROPT_EVALS = 100
+OBJECTIVE = "binary:logistic"
 
 
-def prepare_data(
-        df: pd.DataFrame,
-        generator: rdFingerprintGenerator,
-        seed: int,
-        test_size: float = 0.2,
-        sanitise: bool = False,
-) -> tuple:
-    """
-    Prepare data for training. This function will featurize the SMILES strings and split the data into training and
-    testing sets. It will also convert the data into DMatrix format for XGBoost.
+@dataclass
+class XGBTrainResult:
+    model: XGBClassifier
+    classifier: XGBFingerprintClassifier
+    report: dict
+    outdir: Path
 
-    :param df: A dataframe containing 2 columns: SMILES, LABEL
-    :param generator: RDKit fingerprint generator
-    :param seed: Random seed
-    :param test_size: Proportion of data to use for testing
-    :param sanitise: Boolean flag, if True sanitise the SMILES strings
-    :return: Tuple containing DMatrix for training, DMatrix for testing, features, labels, training features,
-    """
-    logger.info("Preparing data for training")
-    # Generate fingerprints
-    x = featurize_smiles(
-        smiles=df["SMILES"].to_list(), fp_generator=generator, sanitize=sanitise
-    )
-    y = df["LABEL"].to_list()
 
-    # Prepare train/test split
-    x_train, x_test, y_train, y_test = train_test_split(
-        x, y, test_size=test_size, random_state=seed
-    )
-
-    # Format train/test split into DMatrix to improve runtime performance
-    dtrain = xgb.DMatrix(data=x_train, label=y_train)
-    dtest = xgb.DMatrix(data=x_test, label=y_test)
-
-    return dtrain, dtest, x, y, x_train, y_train, x_test, y_test
+def _int_params(params: dict) -> dict:
+    converted = dict(params)
+    for key in ("alpha", "max_depth", "min_child_weight"):
+        if key in converted:
+            converted[key] = int(converted[key])
+    return converted
 
 
 def hyperparameterisation(params: dict) -> dict:
-    """
-    Objective function for hyperparameter optimisation. Here we do XGBoost 5-fold cross-validation and return
-    -1*AUC as the loss. We convert to negative as the optimisation function minimises the loss.
-
-    :param params: Dictionary for parameters that will be optimised.
-    :return: Dictionary containing loss
-    """
-    # Extract training data from params. We need to remove it from here, so it's not passed in to the params argument
+    """Hyperopt objective: 5-fold XGBoost CV, loss = -AUC."""
+    params = _int_params(dict(params))
     dtrain = params.pop("dtrain")
-
-    # Perform cross-validation
     results = xgb.cv(
         dtrain=dtrain,
         params=params,
         nfold=5,
-        num_boost_round=1000,
-        early_stopping_rounds=20,
+        num_boost_round=NUM_BOOST_ROUND,
+        early_stopping_rounds=EARLY_STOPPING_ROUNDS,
         metrics="auc",
         as_pandas=True,
+        seed=int(params.get("seed", 0)),
     )
-    auc = results["test-auc-mean"].max()
-    return {"loss": -1 * auc, "status": STATUS_OK}
+    auc_series = results["test-auc-mean"]
+    if auc_series.isna().all():
+        return {
+            "loss": 0.0,
+            "status": STATUS_OK,
+            "n_estimators": 1,
+            "auc": 0.0,
+        }
+    auc = float(auc_series.max())
+    n_estimators = int(auc_series.idxmax()) + 1
+    return {
+        "loss": -1 * auc,
+        "status": STATUS_OK,
+        "n_estimators": n_estimators,
+        "auc": auc,
+    }
 
 
-def train_cross_validation_model(dtrain: xgb.DMatrix, seed: int) -> tuple[dict, float]:
-    """
-    Perform hyperparameter optimisation using hyperopt. We use the TPE algorithm to find the best hyperparameters
-    for our model.
+def _sklearn_params(best: dict, seed: int, n_estimators: int) -> dict:
+    return {
+        "objective": OBJECTIVE,
+        "alpha": int(best["alpha"]),
+        "gamma": float(best["gamma"]),
+        "reg_lambda": float(best["reg_lambda"]),
+        "colsample_bytree": float(best["colsample_bytree"]),
+        "min_child_weight": int(best["min_child_weight"]),
+        "max_depth": int(best["max_depth"]),
+        "learning_rate": float(best["learning_rate"]),
+        "n_estimators": int(n_estimators),
+        "random_state": int(seed),
+        "seed": int(seed),
+        "eval_metric": "auc",
+    }
 
-    :param dtrain: Training data in DMatrix format
-    :param seed: Random seed
-    :return: Tuple containing the best hyperparameters and the loss
-    """
+
+def _cv_native_params(sklearn_params: dict) -> dict:
+    params = {
+        "objective": sklearn_params["objective"],
+        "alpha": sklearn_params["alpha"],
+        "gamma": sklearn_params["gamma"],
+        "reg_lambda": sklearn_params["reg_lambda"],
+        "colsample_bytree": sklearn_params["colsample_bytree"],
+        "min_child_weight": sklearn_params["min_child_weight"],
+        "max_depth": sklearn_params["max_depth"],
+        "learning_rate": sklearn_params["learning_rate"],
+        "seed": sklearn_params["seed"],
+        "eval_metric": "auc",
+    }
+    return params
+
+
+def evaluate_cv(dtrain: xgb.DMatrix, sklearn_params: dict, seed: int) -> tuple[float, int]:
+    """Re-run CV with fitted params to get AUC and best n_estimators."""
+    results = xgb.cv(
+        dtrain=dtrain,
+        params=_cv_native_params(sklearn_params),
+        nfold=5,
+        num_boost_round=NUM_BOOST_ROUND,
+        early_stopping_rounds=EARLY_STOPPING_ROUNDS,
+        metrics="auc",
+        as_pandas=True,
+        seed=seed,
+    )
+    auc_series = results["test-auc-mean"]
+    if auc_series.isna().all():
+        return 0.0, 1
+    auc = float(auc_series.max())
+    n_estimators = int(auc_series.idxmax()) + 1
+    return auc, n_estimators
+
+
+def train_cross_validation_model(
+    dtrain: xgb.DMatrix, seed: int, max_evals: int = HYPEROPT_EVALS
+) -> dict:
+    """TPE hyperparameter search; returns sklearn params, CV AUC, and n_estimators."""
     logger.info("Hyperparameter optimisation")
-
-    # k-fold Cross validation
-    hyperparams = {
-        "objective": "binary:logistic",
+    space = {
+        "objective": OBJECTIVE,
+        "eval_metric": "auc",
         "dtrain": dtrain,
         "alpha": hp.quniform("alpha", 10, 200, 1),
         "gamma": hp.uniform("gamma", 1, 9),
-        "lambda": hp.uniform("reg_lambda", 0, 1),
+        "reg_lambda": hp.uniform("reg_lambda", 0, 1),
         "colsample_bytree": hp.uniform("colsample_bytree", 0.5, 1),
         "min_child_weight": hp.quniform("min_child_weight", 0, 10, 1),
         "max_depth": hp.uniformint("max_depth", 3, 18),
         "learning_rate": hp.uniform("learning_rate", 0.01, 0.2),
         "seed": seed,
     }
-
     trials = Trials()
-    best_hyperparams = fmin(
+    best = fmin(
         fn=hyperparameterisation,
-        space=hyperparams,
+        space=space,
         algo=tpe.suggest,
-        max_evals=100,
+        max_evals=max_evals,
         trials=trials,
         rstate=np.random.default_rng(seed),
     )
-
-    # We need to get the loss for the best parameters.
-    # We have to add the training set in again and convert some parameters back into integers
-    best_hyperparams["dtrain"] = dtrain
-    best_hyperparams["alpha"] = int(best_hyperparams["alpha"])
-    best_hyperparams["max_depth"] = int(best_hyperparams["max_depth"])
-    best_hyperparams["min_child_weight"] = int(best_hyperparams["min_child_weight"])
-    loss = hyperparameterisation(best_hyperparams)
-
-    return best_hyperparams, -1 * loss["loss"]
-
-
-def feature_importance(xgb_clf, x: xgb.DMatrix, out_dir: Path):
-    """
-    Perform feature importance analysis using SHAP values. We will save the feature importance as a CSV file and
-    plot the feature importance.
-
-    :param xgb_clf: XGBoost classifier
-    :param x: DMatrix containing the features
-    :param out_dir: Output directory
-    :return:
-    """
-    # Get feature importance
-    feat_import = xgb_clf.get_booster().get_score(importance_type="weight")
-    feat_import = pd.DataFrame.from_dict(
-        feat_import, orient="index", columns=["WEIGHT"]
+    best = _int_params(best)
+    auc, n_estimators = evaluate_cv(
+        dtrain, _sklearn_params(best, seed, n_estimators=100), seed
     )
-
-    # Save feature importance
-    feat_file = out_dir / "featmap.csv"
-    feat_import.to_csv(feat_file)
-
-    # Plot feature importance
-    plot_file = out_dir / "importance.png"
-    xgb.plot_importance(xgb_clf)
-    plt.rcParams["figure.figsize"] = [6, 4]
-    plt.savefig(plot_file)
-
-    # SHAP analysis
-    explainer = shap.Explainer(xgb_clf)
-    shap_file = out_dir / "shap.csv"
-    shap_values_raw = explainer.shap_values(x)
-    shap_values = pd.DataFrame(shap_values_raw)
-    shap_values.to_csv(shap_file)
-
-    fig = plt.figure()
-    shap.plots.force(
-        explainer.expected_value, shap_values_raw[0], x.iloc[0], show=False
-    )
-    fig.savefig(shap_file.as_posix().replace(".csv", ".png"), bbox_inches="tight")
+    params = _sklearn_params(best, seed, n_estimators)
+    return {"params": params, "cv_auc": auc, "n_estimators": n_estimators}
 
 
-def train_classifier(
-        df: pd.DataFrame, model_outpath: str, seed: int = 42, save_features: bool = False
-) -> XGBClassifier:
+def train_xgb_classifier(
+    df: pd.DataFrame,
+    outdir: str | Path,
+    split: str = "random",
+    seed: int = 42,
+    test_size: float = 0.2,
+    force: bool = False,
+    fp_size: int = DEFAULT_FP_SIZE,
+    max_evals: int = HYPEROPT_EVALS,
+    fingerprints: list[str] | None = None,
+) -> XGBTrainResult:
+    """Train an XGBoost fingerprint classifier with checkpointed intermediate results.
+
+    ``df`` must contain SMILES and LABEL (0/1) columns.
     """
-    Main entry point for training a XGBoost classifier. This function will perform hyperparameter optimisation
-    on a set of fingerprints and train a model using the best fingerprint. The model will be saved to disk.
-
-    :param df: A dataframe containing 2 columns: SMILES, LABEL
-    :param model_outpath: Output path for the model
-    :param seed: Random seed
-    :param save_features: Boolean flag, if True save feature importance
-    :return: XGBoost classifier
-    """
-    # Sanitize SMILES
-    df = df.rename(columns={"SMILES": "INPUT_SMILES"})
-    df["SMILES"] = df["INPUT_SMILES"].apply(lambda x: sanitize_smiles(x, as_mol=False))
-    df = df.dropna(subset=["SMILES"])
-    df = df.drop_duplicates(subset=["SMILES"])
-
-    # Set featurization routines
-    fp_size = 2048
-    feature_set = {
-        "Morgan2Bits": GetMorganGenerator(radius=2, fpSize=fp_size),
-        "Morgan2FeatBits": GetMorganGenerator(
-            radius=2,
-            fpSize=fp_size,
-            atomInvariantsGenerator=GetMorganFeatureAtomInvGen(),
-        ),
-        "Morgan3Bits": GetMorganGenerator(radius=3, fpSize=fp_size),
-        "RDKit": GetRDKitFPGenerator(fpSize=fp_size),
-        "AtomPair": GetAtomPairGenerator(fpSize=fp_size),
-        # We can't map atoms to this fingerprint so it will not aid in interpretation.
-        # "Topological": GetTopologicalTorsionGenerator(fpSize=fp_size),
-    }
-
-    # Perform hyperparameter optimisation on all fingerprints to find the best for our model
-    best_results = {}
-    for feature_name, generator in feature_set.items():
-        logger.info(f"Evaluating {feature_name}")
-
-        # Generate Train/Test splits
-        dtrain, _, x, y, x_train, y_train, x_test, y_test = prepare_data(
-            df=df, generator=generator, seed=seed
+    ckpt = RunCheckpointer(outdir, force=force)
+    stored = ckpt.load_config()
+    input_hash = data_hash(df, ["SMILES", "LABEL"])
+    splitter = get_splitter(split)
+    available = get_fingerprint_generators(fp_size=fp_size)
+    selected = list(available) if fingerprints is None else list(fingerprints)
+    unknown = [name for name in selected if name not in available]
+    if unknown:
+        raise ValueError(
+            f"Unknown fingerprint(s) {unknown}. Supported: {sorted(available)}"
         )
 
-        # Cross validate
-        best_hyperparams, loss = train_cross_validation_model(dtrain=dtrain, seed=seed)
+    expected = {
+        "input_hash": input_hash,
+        "split": split,
+        "seed": seed,
+        "test_size": test_size,
+        "fp_size": fp_size,
+        "max_evals": max_evals,
+        "fingerprints": selected,
+        "architecture": ARCHITECTURE,
+    }
 
-        # Store best results
-        best_results[feature_name] = {"loss": loss, "params": best_hyperparams}
+    if ckpt.run_complete(stored, expected):
+        logger.info(f"Reusing completed run in {ckpt.outdir}")
+        classifier = XGBFingerprintClassifier.load(ckpt.outdir)
+        report = ckpt.load_json(ckpt.report_json_path)
+        return XGBTrainResult(
+            model=classifier.model,
+            classifier=classifier,
+            report=report,
+            outdir=ckpt.outdir,
+        )
 
-    # Find feature set that has the best loss and use that to create a model
-    best_features = max(best_results.keys(), key=lambda i: best_results[i]["loss"])
-    auc = best_results[best_features]["loss"]
-    params = best_results[best_features]["params"]
-    logger.info(f"Best Features are: {best_features}. AUC: {auc}")
-    logger.info(f"Params: {params}")
+    if ckpt.should_reuse(
+        ckpt.cleaned_path, stored, {"input_hash": input_hash}
+    ):
+        cleaned = ckpt.load_cleaned()
+    else:
+        logger.info("Cleaning training data")
+        cleaned = clean_training_data(df)
+        ckpt.save_cleaned(cleaned)
 
-    # Regenerate training data
-    dtrain, _, x, y, x_train, y_train, x_test, y_test = prepare_data(
-        df=df, generator=feature_set[best_features], seed=seed
+    cleaned_hash = data_hash(cleaned, ["SMILES", "LABEL"])
+    expected["cleaned_hash"] = cleaned_hash
+
+    split_file = ckpt.split_path(split, seed)
+    if ckpt.should_reuse(
+        split_file,
+        stored,
+        {
+            "cleaned_hash": cleaned_hash,
+            "split": split,
+            "seed": seed,
+            "test_size": test_size,
+        },
+    ):
+        split_payload = ckpt.load_json(split_file)
+        train_idx = split_payload["train_idx"]
+        test_idx = split_payload["test_idx"]
+        logger.info(f"Loading split from {split_file}")
+    else:
+        logger.info(f"Splitting data with strategy={split!r}")
+        train_idx, test_idx = splitter.split(
+            smiles=cleaned["SMILES"].tolist(),
+            labels=cleaned["LABEL"].tolist(),
+            test_size=test_size,
+            seed=seed,
+        )
+        ckpt.save_json(
+            split_file, {"train_idx": train_idx, "test_idx": test_idx}
+        )
+
+    generators = {name: available[name] for name in selected}
+    labels = cleaned["LABEL"].to_numpy()
+    fingerprint_comparison: dict[str, dict] = {}
+
+    for fp_name, generator in generators.items():
+        logger.info(f"Evaluating {fp_name}")
+        feat_path = ckpt.features_path(fp_name)
+        if ckpt.should_reuse(
+            feat_path,
+            stored,
+            {"cleaned_hash": cleaned_hash, "fp_size": fp_size},
+        ):
+            features = ckpt.load_features(fp_name)
+        else:
+            features = featurize_smiles(
+                smiles=cleaned["SMILES"].tolist(),
+                fp_generator=generator,
+                sanitize=False,
+            )
+            if len(features) != len(cleaned):
+                missing = len(cleaned) - len(features)
+                raise RuntimeError(
+                    f"{fp_name}: {missing} SMILES failed featurization after sanitization"
+                )
+            features = features.reset_index(drop=True)
+            ckpt.save_features(fp_name, features)
+
+        if list(features.index) != list(range(len(cleaned))):
+            features = features.reset_index(drop=True)
+
+        hp_path = ckpt.hyperopt_path(fp_name)
+        if ckpt.should_reuse(
+            hp_path,
+            stored,
+            {
+                "cleaned_hash": cleaned_hash,
+                "split": split,
+                "seed": seed,
+                "test_size": test_size,
+                "fp_size": fp_size,
+                "max_evals": max_evals,
+            },
+        ):
+            logger.info(f"Loading hyperopt results from {hp_path}")
+            hp_result = ckpt.load_json(hp_path)
+        else:
+            x_train = features.iloc[train_idx]
+            y_train = labels[train_idx]
+            dtrain = xgb.DMatrix(data=x_train, label=y_train)
+            hp_result = train_cross_validation_model(
+                dtrain=dtrain, seed=seed, max_evals=max_evals
+            )
+            ckpt.save_json(hp_path, hp_result)
+
+        fingerprint_comparison[fp_name] = {
+            "cv_auc": hp_result["cv_auc"],
+            "n_estimators": hp_result["n_estimators"],
+            "params": hp_result["params"],
+        }
+
+    best_fingerprint = max(
+        fingerprint_comparison.keys(),
+        key=lambda name: fingerprint_comparison[name]["cv_auc"],
+    )
+    best = fingerprint_comparison[best_fingerprint]
+    logger.info(
+        f"Best fingerprint: {best_fingerprint}. CV AUC: {best['cv_auc']:.4f}"
     )
 
-    # instantiate the classifier
-    logger.info("Validating Model")
+    features = ckpt.load_features(best_fingerprint)
+    if list(features.index) != list(range(len(cleaned))):
+        features = features.reset_index(drop=True)
+
+    params = dict(best["params"])
+    params["n_estimators"] = int(best["n_estimators"])
+    x_train = features.iloc[train_idx]
+    y_train = labels[train_idx]
+    x_test = features.iloc[test_idx]
+    y_test = labels[test_idx]
+
+    logger.info("Validating model on held-out test split")
     xgb_clf = XGBClassifier(**params)
     xgb_clf.fit(x_train, y_train)
-
-    # Make predictions on test data
     y_pred = xgb_clf.predict(x_test)
-    clf_report = classification_report(y_test, y_pred.tolist(), output_dict=True)
-    logger.info(f'Model accuracy score: {round(clf_report["accuracy"], 3)}')
-    logger.info(f'Classification report: {clf_report["weighted avg"]}')
+    y_proba = xgb_clf.predict_proba(x_test)[:, 1]
+    test_metrics = compute_test_metrics(y_test, y_pred, y_proba)
+    logger.info(
+        f"Test accuracy={test_metrics['accuracy']:.3f} "
+        f"roc_auc={test_metrics['roc_auc']:.3f} "
+        f"weighted_f1={test_metrics['weighted']['f1']:.3f}"
+    )
 
-    # Train model on full dataset
-    xgb_clf.fit(x, y)
+    report = build_report(
+        split=split,
+        seed=seed,
+        test_size=test_size,
+        n_train=len(train_idx),
+        n_test=len(test_idx),
+        best_fingerprint=best_fingerprint,
+        fingerprint_comparison=fingerprint_comparison,
+        test_metrics=test_metrics,
+        architecture=ARCHITECTURE,
+    )
+    write_report(report, ckpt.report_json_path, ckpt.report_md_path)
 
-    # Save full model
-    xgb_clf.save_model(f"{model_outpath}.ubj")
+    logger.info("Fitting final model on the full dataset")
+    xgb_clf.fit(features, labels)
+    xgb_clf.save_model(str(ckpt.model_path))
+    metadata = {
+        "architecture": ARCHITECTURE,
+        "fingerprint": best_fingerprint,
+        "fp_size": fp_size,
+        "params": to_jsonable(params),
+        "n_estimators": int(best["n_estimators"]),
+    }
+    ckpt.save_json(ckpt.meta_path, metadata)
+    ckpt.save_config(expected)
 
-    # Show feature importance
-    if save_features:
-        out_dir = Path(model_outpath).parents[0]
-        feature_importance(xgb_clf=xgb_clf, x=x, out_dir=out_dir)
-
-    return xgb_clf
+    classifier = XGBFingerprintClassifier(
+        model=xgb_clf,
+        feature_generator=get_fingerprint_generator(best_fingerprint, fp_size),
+        metadata=metadata,
+    )
+    return XGBTrainResult(
+        model=xgb_clf,
+        classifier=classifier,
+        report=report,
+        outdir=ckpt.outdir,
+    )

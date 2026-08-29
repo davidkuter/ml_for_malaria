@@ -53,3 +53,19 @@ cover/
 
 # Data
 data/
+
+# Training runs
+runs/
+
+# Virtual environments
+# No trailing slash: on WSL this path is a symlink, and `.venv/` only matches directories.
+.venv
+.venv-dev
+venv
+env
+
+# Cursor local agent rules
+.cursor/rules/
+
+# Local env activation (WSL / machine-specific)
+activate.sh
