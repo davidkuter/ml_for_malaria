@@ -18,3 +18,7 @@ uv run ruff check .
 ```
 
 Add a runtime dependency with `uv add <package>`, or a dev-only tool with `uv add --dev <package>`. `uv.lock` is the pinned resolution; regenerate it with `uv lock`.
+
+## Architecture
+
+Package layout, import direction, and where new code belongs: [docs/architecture.md](docs/architecture.md). `ml_for_malaria.train` is trainers only; chemistry, splits, run I/O, and reports live beside it.
