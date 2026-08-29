@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -13,33 +14,31 @@ from xgboost import XGBClassifier
 from ml_for_malaria.model.xgb_classifier import ARCHITECTURE, XGBFingerprintClassifier
 from ml_for_malaria.schemas import (
     CleanedTrainingData,
+    EvalMetrics,
     FingerprintScore,
     HyperoptInjected,
     HyperoptObjectiveResult,
     HyperoptResult,
     ModelMeta,
     RunConfig,
-    SplitIndices,
     TrainingReport,
     XGBParams,
 )
-from ml_for_malaria.train.checkpoints import RunCheckpointer, data_hash, to_jsonable
+from ml_for_malaria.train.checkpoints import to_jsonable
 from ml_for_malaria.train.featurization import (
     DEFAULT_FP_SIZE,
-    clean_training_data,
     featurize_smiles,
-    get_fingerprint_generator,
     get_fingerprint_generators,
 )
+from ml_for_malaria.train.prepare import prepare_training_run
 from ml_for_malaria.train.report import build_report, compute_test_metrics, write_report
-from ml_for_malaria.train.split import get_splitter
+from ml_for_malaria.train.run_dir import resolve_run_dir
 
 NUM_BOOST_ROUND = 1000
 EARLY_STOPPING_ROUNDS = 20
 HYPEROPT_EVALS = 100
 OBJECTIVE = "binary:logistic"
 _XGB_CV_AUC = "test-auc-mean"
-_HASH_COLUMNS = [CleanedTrainingData.SMILES, CleanedTrainingData.LABEL]
 _INT_XGB_PARAMS = (
     XGBParams.alpha,
     XGBParams.max_depth,
@@ -149,6 +148,22 @@ def train_cross_validation_model(
     )
 
 
+def _fit_fingerprint_model(
+    features: pd.DataFrame,
+    y: pd.Series,
+    train_idx: list[int],
+    test_idx: list[int],
+    params: XGBParams,
+) -> tuple[XGBClassifier, EvalMetrics]:
+    xgb_clf = XGBClassifier(**params.model_dump())
+    xgb_clf.fit(features.iloc[train_idx], y.iloc[train_idx])
+    y_pred = xgb_clf.predict(features.iloc[test_idx])
+    y_proba = xgb_clf.predict_proba(features.iloc[test_idx])[:, 1]
+    test_metrics = compute_test_metrics(y.iloc[test_idx], y_pred, y_proba)
+    xgb_clf.fit(features, y)
+    return xgb_clf, test_metrics
+
+
 def train_xgb_classifier(
     df: pd.DataFrame,
     outdir: str | Path,
@@ -163,11 +178,21 @@ def train_xgb_classifier(
     """Train an XGBoost fingerprint classifier with checkpointed intermediate results.
 
     ``df`` must contain SMILES and LABEL (0/1) columns.
+    ``outdir`` is the parent runs directory; artifacts go in
+    ``{outdir}/{arch}_{split}/``. CV AUC selects the default ``model.ubj``;
+    every fingerprint is scored on the frozen test split and saved under
+    ``models/{fingerprint}/``.
     """
-    ckpt = RunCheckpointer(outdir, force=force)
-    stored = ckpt.load_config()
-    input_hash = data_hash(df, _HASH_COLUMNS)
-    splitter = get_splitter(split)
+    outdir = resolve_run_dir(outdir, ARCHITECTURE, split)
+    prepared = prepare_training_run(
+        df,
+        outdir,
+        split=split,
+        seed=seed,
+        test_size=test_size,
+        force=force,
+    )
+    ckpt = prepared.ckpt
     available = get_fingerprint_generators(fp_size=fp_size)
     selected = list(available) if fingerprints is None else list(fingerprints)
     unknown = [name for name in selected if name not in available]
@@ -177,7 +202,7 @@ def train_xgb_classifier(
         )
 
     expected = RunConfig(
-        input_hash=input_hash,
+        input_hash=prepared.input_hash,
         split=split,
         seed=seed,
         test_size=test_size,
@@ -185,9 +210,10 @@ def train_xgb_classifier(
         max_evals=max_evals,
         fingerprints=selected,
         architecture=ARCHITECTURE,
+        cleaned_hash=prepared.cleaned_hash,
     )
 
-    if ckpt.run_complete(stored, expected):
+    if ckpt.run_complete(prepared.stored, expected):
         logger.info(f"Reusing completed run in {ckpt.outdir}")
         classifier = XGBFingerprintClassifier.load(ckpt.outdir)
         report = TrainingReport.model_validate(ckpt.load_json(ckpt.report_json_path))
@@ -198,44 +224,13 @@ def train_xgb_classifier(
             outdir=ckpt.outdir,
         )
 
-    if ckpt.should_reuse(ckpt.cleaned_path, stored, {RunConfig.input_hash: input_hash}):
-        cleaned = ckpt.load_cleaned()
-    else:
-        logger.info("Cleaning training data")
-        cleaned = clean_training_data(df)
-        ckpt.save_cleaned(cleaned)
-
-    cleaned_hash = data_hash(cleaned, _HASH_COLUMNS)
-    expected = expected.model_copy(update={RunConfig.cleaned_hash: cleaned_hash})
-
-    split_file = ckpt.split_path(split, seed)
-    if ckpt.should_reuse(
-        split_file,
-        stored,
-        {
-            RunConfig.cleaned_hash: cleaned_hash,
-            RunConfig.split: split,
-            RunConfig.seed: seed,
-            RunConfig.test_size: test_size,
-        },
-    ):
-        split_payload = SplitIndices.model_validate(ckpt.load_json(split_file))
-        train_idx = split_payload.train_idx
-        test_idx = split_payload.test_idx
-        logger.info(f"Loading split from {split_file}")
-    else:
-        logger.info(f"Splitting data with strategy={split!r}")
-        train_idx, test_idx = splitter.split(
-            smiles=cleaned[CleanedTrainingData.SMILES],
-            labels=cleaned[CleanedTrainingData.LABEL],
-            test_size=test_size,
-            seed=seed,
-        )
-        ckpt.save_json(split_file, SplitIndices(train_idx=train_idx, test_idx=test_idx))
-
+    cleaned = prepared.cleaned
+    train_idx = prepared.train_idx
+    test_idx = prepared.test_idx
     generators = {name: available[name] for name in selected}
     y = cleaned[CleanedTrainingData.LABEL]
     fingerprint_comparison: dict[str, FingerprintScore] = {}
+    stored = prepared.stored
 
     for fp_name, generator in generators.items():
         logger.info(f"Evaluating {fp_name}")
@@ -244,7 +239,7 @@ def train_xgb_classifier(
             feat_path,
             stored,
             {
-                RunConfig.cleaned_hash: cleaned_hash,
+                RunConfig.cleaned_hash: prepared.cleaned_hash,
                 RunConfig.fp_size: fp_size,
             },
         ):
@@ -270,7 +265,7 @@ def train_xgb_classifier(
             hp_path,
             stored,
             {
-                RunConfig.cleaned_hash: cleaned_hash,
+                RunConfig.cleaned_hash: prepared.cleaned_hash,
                 RunConfig.split: split,
                 RunConfig.seed: seed,
                 RunConfig.test_size: test_size,
@@ -290,39 +285,52 @@ def train_xgb_classifier(
             )
             ckpt.save_json(hp_path, hp_result)
 
+        params = hp_result.params.model_copy(
+            update={XGBParams.n_estimators: int(hp_result.n_estimators)}
+        )
+        logger.info(f"Validating {fp_name} on held-out test split")
+        xgb_clf, test_metrics = _fit_fingerprint_model(
+            features, y, train_idx, test_idx, params
+        )
+        logger.info(
+            f"{fp_name}: CV AUC={hp_result.cv_auc:.4f} "
+            f"test ROC-AUC={test_metrics.roc_auc:.4f}"
+        )
         fingerprint_comparison[fp_name] = FingerprintScore(
             cv_auc=hp_result.cv_auc,
             n_estimators=hp_result.n_estimators,
-            params=hp_result.params.model_dump(),
+            params=params.model_dump(),
+            test_metrics=test_metrics,
         )
+        metadata = ModelMeta(
+            architecture=ARCHITECTURE,
+            fingerprint=fp_name,
+            fp_size=fp_size,
+            params=to_jsonable(params.model_dump()),
+            n_estimators=int(hp_result.n_estimators),
+        )
+        ckpt.fingerprint_dir(fp_name).mkdir(parents=True, exist_ok=True)
+        xgb_clf.save_model(str(ckpt.fingerprint_model_path(fp_name)))
+        ckpt.save_json(ckpt.fingerprint_meta_path(fp_name), metadata)
 
-    comparison = pd.DataFrame.from_dict(
-        {name: score.model_dump() for name, score in fingerprint_comparison.items()},
-        orient="index",
-    )
+    comparison = pd.DataFrame(
+        {
+            name: {FingerprintScore.cv_auc: score.cv_auc}
+            for name, score in fingerprint_comparison.items()
+        }
+    ).T
     best_fingerprint = comparison[FingerprintScore.cv_auc].idxmax()
     best = fingerprint_comparison[best_fingerprint]
-    logger.info(f"Best fingerprint: {best_fingerprint}. CV AUC: {best.cv_auc:.4f}")
-
-    features = ckpt.load_features(best_fingerprint)
-    params = XGBParams.model_validate(best.params).model_copy(
-        update={XGBParams.n_estimators: int(best.n_estimators)}
-    )
-    x_train = features.iloc[train_idx]
-    y_train = y.iloc[train_idx]
-    x_test = features.iloc[test_idx]
-    y_test = y.iloc[test_idx]
-
-    logger.info("Validating model on held-out test split")
-    xgb_clf = XGBClassifier(**params.model_dump())
-    xgb_clf.fit(x_train, y_train)
-    y_pred = xgb_clf.predict(x_test)
-    y_proba = xgb_clf.predict_proba(x_test)[:, 1]
-    test_metrics = compute_test_metrics(y_test, y_pred, y_proba)
     logger.info(
-        f"Test accuracy={test_metrics.accuracy:.3f} "
-        f"roc_auc={test_metrics.roc_auc:.3f} "
-        f"weighted_f1={test_metrics.weighted.f1:.3f}"
+        f"Best fingerprint by CV AUC: {best_fingerprint} ({best.cv_auc:.4f})"
+    )
+    shutil.copy2(
+        ckpt.fingerprint_model_path(best_fingerprint),
+        ckpt.model_path,
+    )
+    shutil.copy2(
+        ckpt.fingerprint_meta_path(best_fingerprint),
+        ckpt.meta_path,
     )
 
     report = build_report(
@@ -333,31 +341,15 @@ def train_xgb_classifier(
         n_test=len(test_idx),
         best_fingerprint=best_fingerprint,
         fingerprint_comparison=fingerprint_comparison,
-        test_metrics=test_metrics,
+        test_metrics=best.test_metrics,
         architecture=ARCHITECTURE,
     )
     write_report(report, ckpt.report_json_path, ckpt.report_md_path)
-
-    logger.info("Fitting final model on the full dataset")
-    xgb_clf.fit(features, y)
-    xgb_clf.save_model(str(ckpt.model_path))
-    metadata = ModelMeta(
-        architecture=ARCHITECTURE,
-        fingerprint=best_fingerprint,
-        fp_size=fp_size,
-        params=to_jsonable(params.model_dump()),
-        n_estimators=int(best.n_estimators),
-    )
-    ckpt.save_json(ckpt.meta_path, metadata)
     ckpt.save_config(expected)
 
-    classifier = XGBFingerprintClassifier(
-        model=xgb_clf,
-        feature_generator=get_fingerprint_generator(best_fingerprint, fp_size),
-        metadata=metadata,
-    )
+    classifier = XGBFingerprintClassifier.load(ckpt.outdir)
     return XGBTrainResult(
-        model=xgb_clf,
+        model=classifier.model,
         classifier=classifier,
         report=report,
         outdir=ckpt.outdir,

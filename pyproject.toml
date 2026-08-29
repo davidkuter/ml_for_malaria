@@ -52,3 +52,12 @@ include = ["ml_for_malaria*"]
 default-groups = ["dev"]
 # Repo lives on a Windows drive; WSL cannot hardlink from the Linux uv cache.
 link-mode = "copy"
+
+[project.optional-dependencies]
+dl = [
+    "chemprop>=2.1",
+    "torch",
+    "transformers",
+    "accelerate",
+    "lightning",
+]

@@ -6,13 +6,14 @@ field names to use instead of string literals.
 
 from __future__ import annotations
 
+from enum import StrEnum
 from typing import Any
 
 import numpy as np
 import pandas as pd
 import pandera.pandas as pa
 from pandera.typing import Series
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class JsonModel(BaseModel):
@@ -26,6 +27,29 @@ class JsonModel(BaseModel):
         super().__pydantic_init_subclass__(**kwargs)
         for name in cls.model_fields:
             setattr(cls, name, name)
+
+
+class Architecture(StrEnum):
+    XGBOOST = "xgboost"
+    CHEMPROP = "chemprop"
+    CHEMBERTA = "chemberta"
+
+
+class ChargeMethod(StrEnum):
+    NAGL = "nagl"
+    GASTEIGER = "gasteiger"
+
+
+class PretrainedCheckpoint(StrEnum):
+    CHEMBERTA_77M_MTR = "DeepChem/ChemBERTa-77M-MTR"
+    TINY_TEST = "tiny-test"
+
+
+class ClassLabel(StrEnum):
+    """String labels used in sklearn classification reports and per-class tables."""
+
+    INACTIVE = "0"
+    ACTIVE = "1"
 
 
 class MetricRow(JsonModel):
@@ -80,7 +104,8 @@ class HyperoptResult(JsonModel):
 class FingerprintScore(JsonModel):
     cv_auc: float
     n_estimators: int
-    params: dict[str, Any] = {}
+    params: dict[str, Any] = Field(default_factory=dict)
+    test_metrics: EvalMetrics | None = None
 
 
 class SplitIndices(JsonModel):
@@ -93,19 +118,28 @@ class RunConfig(JsonModel):
     split: str
     seed: int
     test_size: float
-    fp_size: int
-    max_evals: int
-    fingerprints: list[str]
     architecture: str
+    fp_size: int | None = None
+    max_evals: int | None = None
+    fingerprints: list[str] | None = None
     cleaned_hash: str | None = None
+    pretrained_name: str | None = None
+    max_epochs: int | None = None
+    batch_size: int | None = None
+    charge_method: str | None = None
+    freeze_encoder: bool | None = None
+    hidden_size: int | None = None
 
 
 class ModelMeta(JsonModel):
     architecture: str
-    fingerprint: str
-    fp_size: int
+    fingerprint: str = ""
+    fp_size: int = 0
     n_estimators: int = 0
-    params: dict[str, Any] = {}
+    params: dict[str, Any] = Field(default_factory=dict)
+    pretrained_name: str | None = None
+    charge_method: str | None = None
+    freeze_encoder: bool | None = None
 
 
 class TrainingReport(JsonModel):
@@ -114,10 +148,35 @@ class TrainingReport(JsonModel):
     test_size: float
     n_train: int
     n_test: int
-    best_fingerprint: str
-    fingerprint_comparison: dict[str, FingerprintScore]
     test_metrics: EvalMetrics
     architecture: str | None = None
+    best_fingerprint: str | None = None
+    fingerprint_comparison: dict[str, FingerprintScore] = Field(default_factory=dict)
+    charge_method: str | None = None
+    pretrained_name: str | None = None
+
+
+class ComparisonRow(JsonModel):
+    architecture: str
+    identifier: str
+    n_train: int
+    n_test: int
+    roc_auc: float
+    accuracy: float
+    f1_0: float
+    f1_1: float
+    weighted_f1: float
+    charge_method: str | None = None
+    split: str
+    seed: int
+    test_size: float
+    cleaned_hash: str | None = None
+    outdir: str
+
+
+class ComparisonReport(JsonModel):
+    rows: list[ComparisonRow]
+    warnings: list[str] = Field(default_factory=list)
 
 
 class CleanedTrainingData(pa.DataFrameModel):
@@ -190,11 +249,16 @@ class ShapValues(pa.DataFrameModel):
 
 
 class FingerprintComparison(pa.DataFrameModel):
-    """Per-fingerprint CV results used in the training report."""
+    """Per-fingerprint CV and held-out test results used in the training report."""
 
     fingerprint: Series[str]
     cv_auc: Series[float]
     n_estimators: Series[int]
+    roc_auc: Series[float]
+    accuracy: Series[float]
+    f1_0: Series[float]
+    f1_1: Series[float]
+    weighted_f1: Series[float]
 
     class Config:
         coerce = True
@@ -213,6 +277,22 @@ class SettingsTable(pa.DataFrameModel):
 class MetricsTable(pa.DataFrameModel):
     metric: Series[str]
     value: Series[float]
+
+    class Config:
+        coerce = True
+        strict = False
+
+
+class ComparisonTable(pa.DataFrameModel):
+    architecture: Series[str]
+    identifier: Series[str]
+    n_train: Series[int]
+    n_test: Series[int]
+    roc_auc: Series[float]
+    accuracy: Series[float]
+    f1_0: Series[float]
+    f1_1: Series[float]
+    weighted_f1: Series[float]
 
     class Config:
         coerce = True

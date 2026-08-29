@@ -10,7 +10,12 @@ import pandas as pd
 from loguru import logger
 from pydantic import BaseModel
 
-from ml_for_malaria.schemas import CleanedTrainingData, FingerprintFeatures, RunConfig
+from ml_for_malaria.schemas import (
+    Architecture,
+    CleanedTrainingData,
+    FingerprintFeatures,
+    RunConfig,
+)
 
 
 def data_hash(df: pd.DataFrame, columns: list[str]) -> str:
@@ -45,6 +50,9 @@ def _as_dict(stored: dict | BaseModel) -> dict:
 class RunCheckpointer:
     """Load/save run artifacts under ``outdir`` and decide when to reuse them."""
 
+    REPORT_JSON = "report.json"
+    REPORT_MD = "report.md"
+
     def __init__(self, outdir: str | Path, force: bool = False):
         self.outdir = Path(outdir)
         self.force = force
@@ -52,6 +60,7 @@ class RunCheckpointer:
         (self.outdir / "splits").mkdir(exist_ok=True)
         (self.outdir / "features").mkdir(exist_ok=True)
         (self.outdir / "hyperopt").mkdir(exist_ok=True)
+        (self.outdir / "models").mkdir(exist_ok=True)
 
     def save_json(self, path: Path, data: dict | BaseModel) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -111,9 +120,26 @@ class RunCheckpointer:
     def hyperopt_path(self, fp_name: str) -> Path:
         return self.outdir / "hyperopt" / f"{fp_name}.json"
 
+    def fingerprint_dir(self, fp_name: str) -> Path:
+        return self.outdir / "models" / fp_name
+
+    def fingerprint_model_path(self, fp_name: str) -> Path:
+        return self.fingerprint_dir(fp_name) / "model.ubj"
+
+    def fingerprint_meta_path(self, fp_name: str) -> Path:
+        return self.fingerprint_dir(fp_name) / "model_meta.json"
+
     @property
     def model_path(self) -> Path:
         return self.outdir / "model.ubj"
+
+    @property
+    def lightning_ckpt_path(self) -> Path:
+        return self.outdir / "model.ckpt"
+
+    @property
+    def hf_model_dir(self) -> Path:
+        return self.outdir / "hf_model"
 
     @property
     def meta_path(self) -> Path:
@@ -121,17 +147,32 @@ class RunCheckpointer:
 
     @property
     def report_json_path(self) -> Path:
-        return self.outdir / "report.json"
+        return self.outdir / self.REPORT_JSON
 
     @property
     def report_md_path(self) -> Path:
-        return self.outdir / "report.md"
+        return self.outdir / self.REPORT_MD
+
+    def model_artifact_path(self, architecture: str) -> Path:
+        if architecture == Architecture.CHEMPROP:
+            return self.lightning_ckpt_path
+        if architecture == Architecture.CHEMBERTA:
+            return self.hf_model_dir / "config.json"
+        return self.model_path
 
     def run_complete(self, stored: RunConfig | None, expected: RunConfig) -> bool:
         if self.force or stored is None:
             return False
+        artifact = self.model_artifact_path(expected.architecture)
         if not self.should_reuse(
-            self.model_path, stored, expected.model_dump(exclude_none=True)
+            artifact, stored, expected.model_dump(exclude_none=True)
         ):
             return False
-        return self.meta_path.exists() and self.report_json_path.exists()
+        if not (self.meta_path.exists() and self.report_json_path.exists()):
+            return False
+        xgb_models_ready = not (
+            expected.architecture == Architecture.XGBOOST
+            and expected.fingerprints
+            and not self.fingerprint_model_path(expected.fingerprints[0]).exists()
+        )
+        return xgb_models_ready

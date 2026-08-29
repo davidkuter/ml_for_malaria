@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from pathlib import Path
 
 import numpy as np
@@ -28,14 +30,23 @@ class XGBFingerprintClassifier:
         self.metadata = metadata
 
     @classmethod
-    def load(cls, outdir: str | Path) -> "XGBFingerprintClassifier":
-        """Load ``model.ubj`` and ``model_meta.json`` from an XGBoost training run."""
+    def load(
+        cls, outdir: str | Path, fingerprint: str | None = None
+    ) -> XGBFingerprintClassifier:
+        """Load an XGBoost run. ``fingerprint`` selects ``models/{fingerprint}/``."""
         ckpt = RunCheckpointer(outdir)
-        if not ckpt.meta_path.exists() or not ckpt.model_path.exists():
+        if fingerprint is None:
+            meta_path = ckpt.meta_path
+            model_path = ckpt.model_path
+        else:
+            meta_path = ckpt.fingerprint_meta_path(fingerprint)
+            model_path = ckpt.fingerprint_model_path(fingerprint)
+        if not meta_path.exists() or not model_path.exists():
             raise FileNotFoundError(
-                f"No saved model in {ckpt.outdir}. Expected model.ubj and model_meta.json"
+                f"No saved model in {ckpt.outdir}. Expected {model_path.name} "
+                f"and {meta_path.name}"
             )
-        metadata = ModelMeta.model_validate(ckpt.load_json(ckpt.meta_path))
+        metadata = ModelMeta.model_validate(ckpt.load_json(meta_path))
         if metadata.architecture != ARCHITECTURE:
             raise ValueError(
                 f"Run directory {ckpt.outdir} was trained with "
@@ -46,9 +57,9 @@ class XGBFingerprintClassifier:
             metadata.fingerprint, fp_size=int(metadata.fp_size)
         )
         model = XGBClassifier()
-        model.load_model(str(ckpt.model_path))
+        model.load_model(str(model_path))
         logger.debug(
-            f"Loaded XGBoost model from {ckpt.model_path} with {metadata.fingerprint}"
+            f"Loaded XGBoost model from {model_path} with {metadata.fingerprint}"
         )
         return cls(model=model, feature_generator=generator, metadata=metadata)
 

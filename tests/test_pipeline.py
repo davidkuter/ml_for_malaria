@@ -4,6 +4,8 @@ import pandas as pd
 import pytest
 
 from ml_for_malaria.schemas import (
+    Architecture,
+    ChargeMethod,
     CleanedTrainingData,
     EvalMetrics,
     FingerprintComparison,
@@ -23,8 +25,38 @@ from ml_for_malaria.train.report import (
     build_report,
     compute_test_metrics,
     report_to_markdown,
+    write_comparison_report,
+    write_report,
+)
+from ml_for_malaria.train.run_dir import (
+    completed_run_dirs,
+    resolve_run_dir,
+    run_dirname,
 )
 from ml_for_malaria.train.split import ScaffoldSplitter, get_splitter, murcko_group_keys
+from tests.toy_data import toy_binary_df
+
+
+def test_run_dirname_encodes_architecture_split_and_charge():
+    assert run_dirname(Architecture.XGBOOST, "scaffold") == "xgb_scaffold"
+    assert run_dirname(Architecture.CHEMPROP, "random") == "chemprop_random"
+    assert (
+        run_dirname(
+            Architecture.CHEMPROP, "scaffold", charge_method=ChargeMethod.GASTEIGER
+        )
+        == "chemprop_scaffold_gasteiger"
+    )
+    assert run_dirname(Architecture.CHEMBERTA, "scaffold") == "chemberta_scaffold"
+    parent = Path("runs")
+    assert resolve_run_dir(parent, Architecture.XGBOOST, "random") == parent / "xgb_random"
+
+
+def test_completed_run_dirs_lists_report_json(tmp_path: Path):
+    done = tmp_path / "xgb_random"
+    done.mkdir()
+    (done / RunCheckpointer.REPORT_JSON).write_text("{}", encoding="utf-8")
+    (tmp_path / "empty").mkdir()
+    assert completed_run_dirs(tmp_path) == [done]
 
 
 def test_get_splitter_unknown():
@@ -162,16 +194,65 @@ def test_compute_test_metrics_and_report_roundtrip(tmp_path: Path):
         n_test=4,
         best_fingerprint="AtomPair",
         fingerprint_comparison={
-            "AtomPair": FingerprintScore(cv_auc=0.9, n_estimators=50)
+            "AtomPair": FingerprintScore(
+                cv_auc=0.9, n_estimators=50, test_metrics=metrics
+            )
         },
         test_metrics=metrics,
+        architecture=Architecture.XGBOOST,
     )
     markdown = report_to_markdown(report)
     assert EvalMetrics.roc_auc in markdown
     assert "AtomPair" in markdown
     assert FingerprintComparison.fingerprint in markdown
+    assert FingerprintComparison.f1_0 in markdown
     assert "true_0" in markdown
     assert "pred_1" in markdown
+    assert "### AtomPair" in markdown
+
+
+def test_comparison_report_warns_on_mismatched_seed(tmp_path: Path):
+    metrics = compute_test_metrics([0, 1], [0, 1], [0.1, 0.9])
+    left = tmp_path / "xgb"
+    right = tmp_path / "chemprop"
+    left.mkdir()
+    right.mkdir()
+    write_report(
+        build_report(
+            split="scaffold",
+            seed=42,
+            test_size=0.2,
+            n_train=10,
+            n_test=4,
+            test_metrics=metrics,
+            architecture=Architecture.XGBOOST,
+            best_fingerprint="AtomPair",
+        ),
+        left / "report.json",
+        left / "report.md",
+    )
+    write_report(
+        build_report(
+            split="scaffold",
+            seed=1,
+            test_size=0.2,
+            n_train=10,
+            n_test=4,
+            test_metrics=metrics,
+            architecture=Architecture.CHEMPROP,
+            charge_method=None,
+        ),
+        right / "report.json",
+        right / "report.md",
+    )
+    out = tmp_path / "comparison.md"
+    comparison = write_comparison_report([left, right], out)
+    assert len(comparison.rows) == 2
+    assert comparison.rows[0].architecture == Architecture.XGBOOST
+    assert comparison.rows[1].identifier == "none"
+    assert any(RunConfig.seed in warning for warning in comparison.warnings)
+    assert out.exists()
+    assert out.with_suffix(".json").exists()
 
 
 def test_checkpointer_reuses_matching_config(tmp_path: Path):
@@ -203,52 +284,13 @@ def test_data_hash_changes_with_labels():
 
 
 def test_train_xgb_classifier_smoke_and_checkpoint_reuse(tmp_path: Path):
+    from ml_for_malaria.model import load_classifier
     from ml_for_malaria.train import train_xgb_classifier
 
-    inactive = [
-        "CCO",
-        "CCN",
-        "CCC",
-        "CCCC",
-        "CCCCC",
-        "CCCCCC",
-        "CCOCC",
-        "CC(C)O",
-        "CC(C)C",
-        "CCCCO",
-        "C1CCCCC1",
-        "CCS",
-        "CCBr",
-        "CCOC",
-        "CCCCCCC",
-    ]
-    active = [
-        "c1ccccc1",
-        "c1ccc(C)cc1",
-        "c1ccc(O)cc1",
-        "c1ccc(N)cc1",
-        "c1ccc(F)cc1",
-        "c1ccc(Cl)cc1",
-        "c1ccncc1",
-        "c1cccnc1",
-        "CC(=O)O",
-        "NCCO",
-        "O=C(O)c1ccccc1",
-        "COc1ccccc1",
-        "CCNc1ccccc1",
-        "c1ccc(Br)cc1",
-        "c1ccc(CC)cc1",
-    ]
-    df = pd.DataFrame(
-        {
-            CleanedTrainingData.SMILES: inactive + active,
-            CleanedTrainingData.LABEL: [0] * len(inactive) + [1] * len(active),
-        }
-    )
-    outdir = tmp_path / "run"
+    df = toy_binary_df()
     result = train_xgb_classifier(
         df,
-        outdir=outdir,
+        outdir=tmp_path,
         split="random",
         seed=0,
         test_size=0.25,
@@ -256,19 +298,31 @@ def test_train_xgb_classifier_smoke_and_checkpoint_reuse(tmp_path: Path):
         fingerprints=["AtomPair"],
         fp_size=128,
     )
+    run = resolve_run_dir(tmp_path, Architecture.XGBOOST, "random")
+    assert result.outdir == run
     assert result.report.best_fingerprint == "AtomPair"
-    assert result.report.architecture == "xgboost"
-    assert (outdir / "report.json").exists()
-    assert (outdir / "report.md").exists()
-    assert (outdir / "model.ubj").exists()
-    assert (outdir / "model_meta.json").exists()
+    assert result.report.architecture == Architecture.XGBOOST
+    assert (run / "report.json").exists()
+    assert (run / "report.md").exists()
+    assert (run / "model.ubj").exists()
+    assert (run / "model_meta.json").exists()
+    assert (run / "models" / "AtomPair" / "model.ubj").exists()
+    score = result.report.fingerprint_comparison["AtomPair"]
+    assert score.test_metrics is not None
+    assert score.test_metrics.roc_auc == result.report.test_metrics.roc_auc
+    markdown = (run / "report.md").read_text(encoding="utf-8")
+    assert FingerprintComparison.f1_1 in markdown
     preds = result.classifier.predict(["CCO", "c1ccncc1"])
     assert Predictions.PROBABILITY in preds.columns
     assert len(preds) == 2
+    loaded = load_classifier(run)
+    assert loaded.metadata.fingerprint == "AtomPair"
+    per_fp = load_classifier(run, fingerprint="AtomPair")
+    assert per_fp.metadata.fingerprint == "AtomPair"
 
     reused = train_xgb_classifier(
         df,
-        outdir=outdir,
+        outdir=tmp_path,
         split="random",
         seed=0,
         test_size=0.25,
@@ -276,4 +330,5 @@ def test_train_xgb_classifier_smoke_and_checkpoint_reuse(tmp_path: Path):
         fingerprints=["AtomPair"],
         fp_size=128,
     )
+    assert reused.outdir == run
     assert reused.report.test_metrics.roc_auc == result.report.test_metrics.roc_auc

@@ -5,6 +5,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from loguru import logger
 from sklearn.metrics import (
     accuracy_score,
     classification_report,
@@ -13,14 +14,21 @@ from sklearn.metrics import (
 )
 
 from ml_for_malaria.schemas import (
+    Architecture,
+    ClassLabel,
+    ComparisonReport,
+    ComparisonRow,
+    ComparisonTable,
     EvalMetrics,
     FingerprintComparison,
     FingerprintScore,
     MetricRow,
     MetricsTable,
+    ModelMeta,
     SettingsTable,
     TrainingReport,
 )
+from ml_for_malaria.train.checkpoints import RunCheckpointer
 
 
 class SklearnReport(StrEnum):
@@ -33,6 +41,7 @@ class SklearnReport(StrEnum):
 
 
 _METRIC_ROWS = tuple(MetricRow.model_fields)
+_NONE_IDENTIFIER = "none"
 
 
 def _metric_row(frame: pd.DataFrame, name: str) -> MetricRow:
@@ -84,6 +93,11 @@ def compute_test_metrics(
     )
 
 
+def class_f1(metrics: EvalMetrics, label: str) -> float:
+    row = metrics.per_class.get(label)
+    return float(row.f1) if row is not None else 0.0
+
+
 def build_report(
     *,
     split: str,
@@ -91,10 +105,12 @@ def build_report(
     test_size: float,
     n_train: int,
     n_test: int,
-    best_fingerprint: str,
-    fingerprint_comparison: dict,
     test_metrics: EvalMetrics,
     architecture: str | None = None,
+    best_fingerprint: str | None = None,
+    fingerprint_comparison: dict | None = None,
+    charge_method: str | None = None,
+    pretrained_name: str | None = None,
 ) -> TrainingReport:
     return TrainingReport(
         split=split,
@@ -102,10 +118,12 @@ def build_report(
         test_size=test_size,
         n_train=n_train,
         n_test=n_test,
-        best_fingerprint=best_fingerprint,
-        fingerprint_comparison=fingerprint_comparison,
         test_metrics=test_metrics,
         architecture=architecture,
+        best_fingerprint=best_fingerprint,
+        fingerprint_comparison=fingerprint_comparison or {},
+        charge_method=charge_method,
+        pretrained_name=pretrained_name,
     )
 
 
@@ -132,6 +150,8 @@ def _run_settings_frame(report: TrainingReport) -> pd.DataFrame:
                 TrainingReport.n_train,
                 TrainingReport.n_test,
                 TrainingReport.best_fingerprint,
+                TrainingReport.charge_method,
+                TrainingReport.pretrained_name,
             )
         }
     ).dropna()
@@ -156,7 +176,9 @@ def _summary_metrics_frame(metrics: EvalMetrics) -> pd.DataFrame:
 
 def _class_names(metrics: EvalMetrics) -> list[str]:
     names = [str(name) for name in metrics.per_class]
-    preferred = [name for name in ("0", "1") if name in names]
+    preferred = [
+        name for name in (ClassLabel.INACTIVE, ClassLabel.ACTIVE) if name in names
+    ]
     return preferred + [name for name in names if name not in preferred]
 
 
@@ -183,58 +205,256 @@ def _fingerprint_frame(comparison: dict[str, FingerprintScore]) -> pd.DataFrame:
         FingerprintComparison.fingerprint,
         FingerprintComparison.cv_auc,
         FingerprintComparison.n_estimators,
+        FingerprintComparison.roc_auc,
+        FingerprintComparison.accuracy,
+        FingerprintComparison.f1_0,
+        FingerprintComparison.f1_1,
+        FingerprintComparison.weighted_f1,
     ]
     if not comparison:
         return pd.DataFrame(columns=columns)
-    frame = (
-        pd.DataFrame.from_dict(
-            {name: score.model_dump() for name, score in comparison.items()},
-            orient="index",
+    rows = [
+        {
+            FingerprintComparison.fingerprint: name,
+            FingerprintComparison.cv_auc: score.cv_auc,
+            FingerprintComparison.n_estimators: score.n_estimators,
+            FingerprintComparison.roc_auc: (
+                score.test_metrics.roc_auc if score.test_metrics is not None else np.nan
+            ),
+            FingerprintComparison.accuracy: (
+                score.test_metrics.accuracy if score.test_metrics is not None else np.nan
+            ),
+            FingerprintComparison.f1_0: (
+                class_f1(score.test_metrics, ClassLabel.INACTIVE)
+                if score.test_metrics is not None
+                else np.nan
+            ),
+            FingerprintComparison.f1_1: (
+                class_f1(score.test_metrics, ClassLabel.ACTIVE)
+                if score.test_metrics is not None
+                else np.nan
+            ),
+            FingerprintComparison.weighted_f1: (
+                score.test_metrics.weighted.f1
+                if score.test_metrics is not None
+                else np.nan
+            ),
+        }
+        for name, score in comparison.items()
+    ]
+    frame = pd.DataFrame(rows, columns=columns)
+    frame[FingerprintComparison.n_estimators] = frame[
+        FingerprintComparison.n_estimators
+    ].astype("Int64")
+    return frame.sort_values(
+        FingerprintComparison.cv_auc, ascending=False
+    ).reset_index(drop=True)
+
+
+def _fingerprint_detail_sections(comparison: dict[str, FingerprintScore]) -> list[str]:
+    if not comparison:
+        return []
+    ordered = _fingerprint_frame(comparison)[FingerprintComparison.fingerprint].tolist()
+    parts: list[str] = []
+    for name in ordered:
+        metrics = comparison[name].test_metrics
+        if metrics is None:
+            continue
+        parts.extend(
+            [
+                f"### {name}",
+                "",
+                "#### Per class",
+                "",
+                _markdown_table(_per_class_frame(metrics), index=True),
+                "",
+                "#### Confusion matrix",
+                "",
+                _markdown_table(_confusion_frame(metrics), index=True, floatfmt=None),
+                "",
+            ]
         )
-        .rename_axis(FingerprintComparison.fingerprint)
-        .reset_index()
-    )
-    present = [col for col in columns if col in frame.columns]
-    frame = frame.loc[:, present]
-    if FingerprintComparison.n_estimators in frame.columns:
-        frame[FingerprintComparison.n_estimators] = frame[
-            FingerprintComparison.n_estimators
-        ].astype("Int64")
-    if FingerprintComparison.cv_auc in frame.columns:
-        frame = frame.sort_values(FingerprintComparison.cv_auc, ascending=False)
-    return frame.reset_index(drop=True)
+    return parts
 
 
 def report_to_markdown(report: TrainingReport) -> str:
     metrics = report.test_metrics
-    return "\n".join(
-        [
-            "# Training report",
-            "",
-            "## Run",
-            "",
-            _markdown_table(_run_settings_frame(report)),
-            "",
-            "## Test metrics",
-            "",
-            _markdown_table(_summary_metrics_frame(metrics)),
-            "",
-            "### Per class",
-            "",
-            _markdown_table(_per_class_frame(metrics), index=True),
-            "",
-            "### Confusion matrix",
-            "",
-            _markdown_table(_confusion_frame(metrics), index=True, floatfmt=None),
-            "",
-            "## Fingerprint comparison (CV AUC)",
-            "",
-            _markdown_table(_fingerprint_frame(report.fingerprint_comparison)),
-            "",
-        ]
-    )
+    sections = [
+        "# Training report",
+        "",
+        "## Run",
+        "",
+        _markdown_table(_run_settings_frame(report)),
+        "",
+        "## Test metrics",
+        "",
+        _markdown_table(_summary_metrics_frame(metrics)),
+        "",
+        "### Per class",
+        "",
+        _markdown_table(_per_class_frame(metrics), index=True),
+        "",
+        "### Confusion matrix",
+        "",
+        _markdown_table(_confusion_frame(metrics), index=True, floatfmt=None),
+        "",
+    ]
+    if report.fingerprint_comparison:
+        sections.extend(
+            [
+                "## Fingerprint comparison",
+                "",
+                _markdown_table(_fingerprint_frame(report.fingerprint_comparison)),
+                "",
+                *_fingerprint_detail_sections(report.fingerprint_comparison),
+            ]
+        )
+    return "\n".join(sections)
 
 
 def write_report(report: TrainingReport, json_path: Path, md_path: Path) -> None:
     json_path.write_text(report.model_dump_json(indent=2), encoding="utf-8")
     md_path.write_text(report_to_markdown(report), encoding="utf-8")
+
+
+def _run_identifier(
+    report: TrainingReport, meta: ModelMeta | None, charge_method: str | None
+) -> str:
+    if report.architecture == Architecture.XGBOOST:
+        return report.best_fingerprint or _NONE_IDENTIFIER
+    if report.architecture == Architecture.CHEMBERTA:
+        name = report.pretrained_name
+        if name is None and meta is not None:
+            name = meta.pretrained_name
+        return name or _NONE_IDENTIFIER
+    if charge_method:
+        return charge_method
+    return _NONE_IDENTIFIER
+
+
+def _metrics_row(
+    report: TrainingReport,
+    *,
+    charge_method: str | None,
+    cleaned_hash: str | None,
+    outdir: Path,
+    meta: ModelMeta | None,
+) -> ComparisonRow:
+    metrics = report.test_metrics
+    return ComparisonRow(
+        architecture=report.architecture or _NONE_IDENTIFIER,
+        identifier=_run_identifier(report, meta, charge_method),
+        n_train=report.n_train,
+        n_test=report.n_test,
+        roc_auc=metrics.roc_auc,
+        accuracy=metrics.accuracy,
+        f1_0=class_f1(metrics, ClassLabel.INACTIVE),
+        f1_1=class_f1(metrics, ClassLabel.ACTIVE),
+        weighted_f1=metrics.weighted.f1,
+        charge_method=charge_method,
+        split=report.split,
+        seed=report.seed,
+        test_size=report.test_size,
+        cleaned_hash=cleaned_hash,
+        outdir=str(outdir),
+    )
+
+
+def _mismatch_warnings(rows: list[ComparisonRow]) -> list[str]:
+    if len(rows) < 2:
+        return []
+    frame = pd.DataFrame([row.model_dump() for row in rows])
+    warnings: list[str] = []
+    for column in (
+        ComparisonRow.split,
+        ComparisonRow.seed,
+        ComparisonRow.test_size,
+        ComparisonRow.cleaned_hash,
+    ):
+        values = frame[column]
+        unique = values.dropna().unique()
+        if len(unique) > 1:
+            warnings.append(f"Mismatched {column}: {sorted(map(str, unique))}")
+            logger.warning(warnings[-1])
+    return warnings
+
+
+def _comparison_frame(rows: list[ComparisonRow]) -> pd.DataFrame:
+    columns = [
+        ComparisonTable.architecture,
+        ComparisonTable.identifier,
+        ComparisonTable.n_train,
+        ComparisonTable.n_test,
+        ComparisonTable.roc_auc,
+        ComparisonTable.accuracy,
+        ComparisonTable.f1_0,
+        ComparisonTable.f1_1,
+        ComparisonTable.weighted_f1,
+    ]
+    if not rows:
+        return pd.DataFrame(columns=columns)
+    frame = pd.DataFrame([row.model_dump() for row in rows])
+    return frame.loc[:, columns]
+
+
+def comparison_to_markdown(report: ComparisonReport) -> str:
+    sections = [
+        "# Architecture comparison",
+        "",
+        "## Test metrics",
+        "",
+        _markdown_table(_comparison_frame(report.rows)),
+        "",
+    ]
+    if report.warnings:
+        sections.extend(
+            [
+                "## Warnings",
+                "",
+                *[f"- {warning}" for warning in report.warnings],
+                "",
+            ]
+        )
+    return "\n".join(sections)
+
+
+def write_comparison_report(
+    run_dirs: list[str | Path],
+    out_path: str | Path,
+) -> ComparisonReport:
+    """Compare held-out test metrics across completed run directories."""
+    rows: list[ComparisonRow] = []
+    for raw in run_dirs:
+        outdir = Path(raw)
+        ckpt = RunCheckpointer(outdir)
+        if not ckpt.report_json_path.exists():
+            raise FileNotFoundError(f"No report.json in {outdir}")
+        report = TrainingReport.model_validate(ckpt.load_json(ckpt.report_json_path))
+        config = ckpt.load_config()
+        meta = (
+            ModelMeta.model_validate(ckpt.load_json(ckpt.meta_path))
+            if ckpt.meta_path.exists()
+            else None
+        )
+        charge_method = report.charge_method
+        if charge_method is None and config is not None:
+            charge_method = config.charge_method
+        if charge_method is None and meta is not None:
+            charge_method = meta.charge_method
+        cleaned_hash = config.cleaned_hash if config is not None else None
+        rows.append(
+            _metrics_row(
+                report,
+                charge_method=charge_method,
+                cleaned_hash=cleaned_hash,
+                outdir=outdir,
+                meta=meta,
+            )
+        )
+    comparison = ComparisonReport(rows=rows, warnings=_mismatch_warnings(rows))
+    out_path = Path(out_path)
+    json_path = out_path.with_suffix(".json")
+    md_path = out_path.with_suffix(".md")
+    json_path.write_text(comparison.model_dump_json(indent=2), encoding="utf-8")
+    md_path.write_text(comparison_to_markdown(comparison), encoding="utf-8")
+    return comparison

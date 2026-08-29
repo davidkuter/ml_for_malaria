@@ -3,12 +3,13 @@ from pathlib import Path
 import pandas as pd
 
 from ml_for_malaria.model import XGBFingerprintClassifier
-from ml_for_malaria.schemas import Predictions
+from ml_for_malaria.schemas import Architecture, Predictions
+from ml_for_malaria.train.run_dir import resolve_run_dir
 
 ROOT = Path(__file__).resolve().parents[2]
 PFPKG = ROOT / "data" / "pfpkg"
 DATA_PATH = PFPKG / "input" / "100nM_Experimental_Azoles.csv"
-OUTDIR = PFPKG / "runs" / "xgb_random"
+OUTDIR = resolve_run_dir(PFPKG / "runs" / "pfpkg", Architecture.XGBOOST, "random")
 RESULTS_PATH = OUTDIR / "pfpkg_results.csv"
 
 df = pd.read_csv(DATA_PATH)
