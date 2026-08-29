@@ -44,18 +44,22 @@ class RandomSplitter:
         return train_idx.tolist(), test_idx.tolist()
 
 
+def _murcko_mol(mol):
+    if mol is None:
+        return None
+    return dm.to_scaffold_murcko(mol)
+
+
+def _murcko_smiles(scaffold) -> str | None:
+    if scaffold is None or scaffold.GetNumAtoms() == 0:
+        return None
+    return dm.to_smiles(scaffold)
+
+
 def murcko_group_keys(smiles: pd.Series) -> pd.Series:
     """Bemis–Murcko scaffold keys; empty scaffolds are unique per row."""
     smiles = smiles.reset_index(drop=True)
-    mols = smiles.map(dm.to_mol)
-    scaffolds = mols.map(
-        lambda mol: dm.to_scaffold_murcko(mol) if mol is not None else None
-    )
-    keys = scaffolds.map(
-        lambda scf: dm.to_smiles(scf)
-        if scf is not None and scf.GetNumAtoms() > 0
-        else None
-    )
+    keys = smiles.map(dm.to_mol).map(_murcko_mol).map(_murcko_smiles)
     empty = keys.isna() | (keys.astype(str).str.len() == 0)
     singletons = "no_scaffold:" + smiles.index.astype(str)
     return keys.where(~empty, singletons)

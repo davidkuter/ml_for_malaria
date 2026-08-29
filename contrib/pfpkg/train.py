@@ -10,7 +10,7 @@ from ml_for_malaria.train.featurization import encode_binary_labels
 ROOT = Path(__file__).resolve().parents[2]
 PFPKG = ROOT / "data" / "pfpkg"
 DATASET_PATH = PFPKG / "input" / "100nM_Training_Set.csv"
-OUTDIR = PFPKG / "runs" / "random"
+OUTDIR = PFPKG / "runs" / "xgb_scaffold"
 
 logger.info(f"Loading data from: {DATASET_PATH}")
 df_input = pd.read_csv(DATASET_PATH)
@@ -25,7 +25,7 @@ df_input[CleanedTrainingData.LABEL] = encode_binary_labels(
 result = train_xgb_classifier(
     df=df_input,
     outdir=OUTDIR,
-    split="random",
+    split="scaffold",
     seed=42,
     force=False,
 )

@@ -24,7 +24,7 @@ from ml_for_malaria.train.report import (
     compute_test_metrics,
     report_to_markdown,
 )
-from ml_for_malaria.train.split import ScaffoldSplitter, get_splitter
+from ml_for_malaria.train.split import ScaffoldSplitter, get_splitter, murcko_group_keys
 
 
 def test_get_splitter_unknown():
@@ -32,16 +32,40 @@ def test_get_splitter_unknown():
         get_splitter("cluster")
 
 
-def test_scaffold_splitter_is_a_stub():
+def test_scaffold_splitter_keeps_murcko_groups_together():
+    benzenes = [
+        "c1ccccc1",
+        "c1ccc(C)cc1",
+        "c1ccc(O)cc1",
+        "c1ccc(N)cc1",
+        "c1ccc(F)cc1",
+        "c1ccc(Cl)cc1",
+        "c1ccc(Br)cc1",
+        "c1ccc(CC)cc1",
+    ]
+    aliphatics = ["CCO", "CCC", "CCCC", "CCCCC", "CCCCCC", "CCOCC", "CC(C)C", "CCCCO"]
+    smiles = pd.Series(benzenes + aliphatics)
+    labels = pd.Series([1] * len(benzenes) + [0] * len(aliphatics))
     splitter = get_splitter("scaffold")
     assert isinstance(splitter, ScaffoldSplitter)
-    with pytest.raises(NotImplementedError, match="Bemis–Murcko"):
-        splitter.split(
-            pd.Series(["CCO", "CCC"]),
-            pd.Series([0, 1]),
-            test_size=0.5,
-            seed=0,
-        )
+
+    train_idx, test_idx = splitter.split(smiles, labels, test_size=0.25, seed=42)
+    n = len(smiles)
+    assert set(train_idx).isdisjoint(test_idx)
+    assert sorted(train_idx + test_idx) == list(range(n))
+    assert 0.1 <= len(test_idx) / n <= 0.45
+
+    keys = murcko_group_keys(smiles)
+    shared = ~keys.str.startswith("no_scaffold:")
+    train_keys = set(keys.iloc[train_idx][shared.iloc[train_idx]])
+    test_keys = set(keys.iloc[test_idx][shared.iloc[test_idx]])
+    assert train_keys.isdisjoint(test_keys)
+
+    again_train, again_test = splitter.split(smiles, labels, test_size=0.25, seed=42)
+    assert train_idx == again_train
+    assert test_idx == again_test
+    other_train, other_test = splitter.split(smiles, labels, test_size=0.25, seed=1)
+    assert (train_idx, test_idx) != (other_train, other_test)
 
 
 def test_random_splitter_is_stratified():
