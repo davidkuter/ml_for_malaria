@@ -104,7 +104,7 @@ class AzoleModel:
         return df
 
     def get_feature_importance(
-            self, smiles: str, img_out: str | None = None
+        self, smiles: str, img_out: str | None = None
     ) -> pd.DataFrame:
         """
         Get the feature importance of a single SMILES string. Optionally save an image of the feature importance
