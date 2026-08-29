@@ -3,6 +3,15 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from ml_for_malaria.schemas import (
+    CleanedTrainingData,
+    EvalMetrics,
+    FingerprintComparison,
+    FingerprintScore,
+    ModelMeta,
+    Predictions,
+    RunConfig,
+)
 from ml_for_malaria.train.checkpoints import RunCheckpointer, data_hash
 from ml_for_malaria.train.featurization import (
     encode_binary_labels,
@@ -73,6 +82,15 @@ def test_featurize_skips_failed_mols_without_misindexing():
     assert features.shape[1] == 128
 
 
+def test_featurize_all_failures_returns_empty_frame():
+    generator = get_fingerprint_generator("AtomPair", fp_size=128)
+    features = featurize_smiles(
+        ["not-a-smiles", "also-bad"], fp_generator=generator, sanitize=False
+    )
+    assert features is not None
+    assert features.empty
+
+
 def test_xgb_load_rejects_other_architecture(tmp_path: Path):
     import json
 
@@ -82,9 +100,9 @@ def test_xgb_load_rejects_other_architecture(tmp_path: Path):
     (tmp_path / "model_meta.json").write_text(
         json.dumps(
             {
-                "architecture": "pytorch",
-                "fingerprint": "AtomPair",
-                "fp_size": 128,
+                ModelMeta.architecture: "pytorch",
+                ModelMeta.fingerprint: "AtomPair",
+                ModelMeta.fp_size: 128,
             }
         ),
         encoding="utf-8",
@@ -98,15 +116,16 @@ def test_compute_test_metrics_and_report_roundtrip(tmp_path: Path):
     y_pred = [0, 1, 1, 1]
     y_proba = [0.1, 0.6, 0.9, 0.8]
     metrics = compute_test_metrics(y_true, y_pred, y_proba)
-    assert set(metrics) >= {
-        "threshold",
-        "accuracy",
-        "roc_auc",
-        "per_class",
-        "macro",
-        "weighted",
-        "confusion_matrix",
-    }
+    dumped = metrics.model_dump()
+    assert {
+        EvalMetrics.threshold,
+        EvalMetrics.accuracy,
+        EvalMetrics.roc_auc,
+        EvalMetrics.per_class,
+        EvalMetrics.macro,
+        EvalMetrics.weighted,
+        EvalMetrics.confusion_matrix,
+    } <= set(dumped)
     report = build_report(
         split="random",
         seed=42,
@@ -115,14 +134,14 @@ def test_compute_test_metrics_and_report_roundtrip(tmp_path: Path):
         n_test=4,
         best_fingerprint="AtomPair",
         fingerprint_comparison={
-            "AtomPair": {"cv_auc": 0.9, "n_estimators": 50, "params": {}}
+            "AtomPair": FingerprintScore(cv_auc=0.9, n_estimators=50)
         },
         test_metrics=metrics,
     )
     markdown = report_to_markdown(report)
-    assert "roc_auc" in markdown
+    assert EvalMetrics.roc_auc in markdown
     assert "AtomPair" in markdown
-    assert "fingerprint" in markdown
+    assert FingerprintComparison.fingerprint in markdown
     assert "true_0" in markdown
     assert "pred_1" in markdown
 
@@ -131,19 +150,24 @@ def test_checkpointer_reuses_matching_config(tmp_path: Path):
     ckpt = RunCheckpointer(tmp_path, force=False)
     path = tmp_path / "item.json"
     ckpt.save_json(path, {"ok": True})
-    stored = {"seed": 42, "split": "random"}
-    assert ckpt.should_reuse(path, stored, {"seed": 42, "split": "random"})
-    assert not ckpt.should_reuse(path, stored, {"seed": 1, "split": "random"})
+    stored = {RunConfig.seed: 42, RunConfig.split: "random"}
+    assert ckpt.should_reuse(path, stored, {RunConfig.seed: 42, RunConfig.split: "random"})
+    assert not ckpt.should_reuse(path, stored, {RunConfig.seed: 1, RunConfig.split: "random"})
     forced = RunCheckpointer(tmp_path, force=True)
-    assert not forced.should_reuse(path, stored, {"seed": 42, "split": "random"})
+    assert not forced.should_reuse(
+        path, stored, {RunConfig.seed: 42, RunConfig.split: "random"}
+    )
 
 
 def test_data_hash_changes_with_labels():
-    df_a = pd.DataFrame({"SMILES": ["CCO"], "LABEL": [1]})
-    df_b = pd.DataFrame({"SMILES": ["CCO"], "LABEL": [0]})
-    assert data_hash(df_a, ["SMILES", "LABEL"]) != data_hash(
-        df_b, ["SMILES", "LABEL"]
+    columns = [CleanedTrainingData.SMILES, CleanedTrainingData.LABEL]
+    df_a = pd.DataFrame(
+        {CleanedTrainingData.SMILES: ["CCO"], CleanedTrainingData.LABEL: [1]}
     )
+    df_b = pd.DataFrame(
+        {CleanedTrainingData.SMILES: ["CCO"], CleanedTrainingData.LABEL: [0]}
+    )
+    assert data_hash(df_a, columns) != data_hash(df_b, columns)
 
 
 def test_train_xgb_classifier_smoke_and_checkpoint_reuse(tmp_path: Path):
@@ -184,7 +208,10 @@ def test_train_xgb_classifier_smoke_and_checkpoint_reuse(tmp_path: Path):
         "c1ccc(CC)cc1",
     ]
     df = pd.DataFrame(
-        {"SMILES": inactive + active, "LABEL": [0] * len(inactive) + [1] * len(active)}
+        {
+            CleanedTrainingData.SMILES: inactive + active,
+            CleanedTrainingData.LABEL: [0] * len(inactive) + [1] * len(active),
+        }
     )
     outdir = tmp_path / "run"
     result = train_xgb_classifier(
@@ -197,14 +224,14 @@ def test_train_xgb_classifier_smoke_and_checkpoint_reuse(tmp_path: Path):
         fingerprints=["AtomPair"],
         fp_size=128,
     )
-    assert result.report["best_fingerprint"] == "AtomPair"
-    assert result.report["architecture"] == "xgboost"
+    assert result.report.best_fingerprint == "AtomPair"
+    assert result.report.architecture == "xgboost"
     assert (outdir / "report.json").exists()
     assert (outdir / "report.md").exists()
     assert (outdir / "model.ubj").exists()
     assert (outdir / "model_meta.json").exists()
     preds = result.classifier.predict(["CCO", "c1ccncc1"])
-    assert "PROBABILITY" in preds.columns
+    assert Predictions.PROBABILITY in preds.columns
     assert len(preds) == 2
 
     reused = train_xgb_classifier(
@@ -217,7 +244,4 @@ def test_train_xgb_classifier_smoke_and_checkpoint_reuse(tmp_path: Path):
         fingerprints=["AtomPair"],
         fp_size=128,
     )
-    assert (
-        reused.report["test_metrics"]["roc_auc"]
-        == result.report["test_metrics"]["roc_auc"]
-    )
+    assert reused.report.test_metrics.roc_auc == result.report.test_metrics.roc_auc

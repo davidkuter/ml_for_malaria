@@ -148,31 +148,36 @@ def encode_binary_labels(
 
 def clean_training_data(df: pd.DataFrame) -> pd.DataFrame:
     """Sanitize SMILES, drop failures, and drop SMILES with conflicting labels."""
-    if "SMILES" not in df.columns or "LABEL" not in df.columns:
-        raise ValueError("Training dataframe must contain SMILES and LABEL columns")
+    smiles = CleanedTrainingData.SMILES
+    label = CleanedTrainingData.LABEL
+    input_smiles = CleanedTrainingData.INPUT_SMILES
+    if smiles not in df.columns or label not in df.columns:
+        raise ValueError(
+            f"Training dataframe must contain {smiles} and {label} columns"
+        )
 
     cleaned = df.copy()
-    cleaned["INPUT_SMILES"] = cleaned["SMILES"]
-    cleaned["SMILES"] = cleaned["INPUT_SMILES"].map(
+    cleaned[input_smiles] = cleaned[smiles]
+    cleaned[smiles] = cleaned[input_smiles].map(
         lambda smi: sanitize_smiles(smi, as_mol=False)
     )
-    n_failed = int(cleaned["SMILES"].isna().sum())
+    n_failed = int(cleaned[smiles].isna().sum())
     if n_failed:
         logger.warning(f"Dropping {n_failed} rows that failed SMILES sanitization")
-    cleaned = cleaned.dropna(subset=["SMILES", "LABEL"])
-    cleaned["LABEL"] = cleaned["LABEL"].astype(int)
+    cleaned = cleaned.dropna(subset=[smiles, label])
+    cleaned[label] = cleaned[label].astype(int)
 
-    conflict_mask = cleaned.groupby("SMILES")["LABEL"].transform("nunique").gt(1)
-    n_conflicts = int(cleaned.loc[conflict_mask, "SMILES"].nunique())
+    conflict_mask = cleaned.groupby(smiles)[label].transform("nunique").gt(1)
+    n_conflicts = int(cleaned.loc[conflict_mask, smiles].nunique())
     if n_conflicts:
         logger.warning(
             f"Dropping {n_conflicts} SMILES with conflicting labels after sanitization"
         )
         cleaned = cleaned.loc[~conflict_mask]
 
-    n_dupes = int(cleaned.duplicated(subset=["SMILES"]).sum())
+    n_dupes = int(cleaned.duplicated(subset=[smiles]).sum())
     if n_dupes:
         logger.info(f"Dropping {n_dupes} duplicate sanitized SMILES (labels agreed)")
     return CleanedTrainingData.validate(
-        cleaned.drop_duplicates(subset=["SMILES"], keep="first").reset_index(drop=True)
+        cleaned.drop_duplicates(subset=[smiles], keep="first").reset_index(drop=True)
     )

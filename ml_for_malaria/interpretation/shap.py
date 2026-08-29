@@ -48,17 +48,19 @@ def shap_feature_importance(
                 "skipping SHAP image"
             )
         else:
+            atom = AtomShapWeights.atom
+            shap_col = AtomShapWeights.shap
             records = [
-                {"atom": atom, "shap": float(shap_values.loc[bit, smiles])}
+                {atom: atom_idx, shap_col: float(shap_values.loc[bit, smiles])}
                 for bit, atoms in bit_map.items()
                 if bit in shap_values.index and shap_values.loc[bit, smiles] != 0.0
-                for atom in atoms
+                for atom_idx in atoms
             ]
             n_atoms = mol.GetNumAtoms()
             if records:
                 weights = (
                     AtomShapWeights.validate(pd.DataFrame(records))
-                    .groupby("atom")["shap"]
+                    .groupby(atom)[shap_col]
                     .median()
                     .reindex(range(n_atoms), fill_value=0.0)
                 )

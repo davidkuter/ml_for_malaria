@@ -8,8 +8,9 @@ from typing import Any
 import numpy as np
 import pandas as pd
 from loguru import logger
+from pydantic import BaseModel
 
-from ml_for_malaria.schemas import CleanedTrainingData, FingerprintFeatures
+from ml_for_malaria.schemas import CleanedTrainingData, FingerprintFeatures, RunConfig
 
 
 def data_hash(df: pd.DataFrame, columns: list[str]) -> str:
@@ -20,6 +21,8 @@ def data_hash(df: pd.DataFrame, columns: list[str]) -> str:
 
 def to_jsonable(obj: Any) -> Any:
     """Convert numpy scalars/arrays so they can be written as JSON."""
+    if isinstance(obj, BaseModel):
+        return to_jsonable(obj.model_dump())
     if isinstance(obj, dict):
         return {str(key): to_jsonable(value) for key, value in obj.items()}
     if isinstance(obj, (list, tuple)):
@@ -35,6 +38,10 @@ def to_jsonable(obj: Any) -> Any:
     return obj
 
 
+def _as_dict(stored: dict | BaseModel) -> dict:
+    return stored.model_dump() if isinstance(stored, BaseModel) else stored
+
+
 class RunCheckpointer:
     """Load/save run artifacts under ``outdir`` and decide when to reuse them."""
 
@@ -46,7 +53,7 @@ class RunCheckpointer:
         (self.outdir / "features").mkdir(exist_ok=True)
         (self.outdir / "hyperopt").mkdir(exist_ok=True)
 
-    def save_json(self, path: Path, data: dict) -> None:
+    def save_json(self, path: Path, data: dict | BaseModel) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(to_jsonable(data), indent=2), encoding="utf-8")
 
@@ -57,19 +64,22 @@ class RunCheckpointer:
     def config_path(self) -> Path:
         return self.outdir / "config.json"
 
-    def save_config(self, config: dict) -> None:
+    def save_config(self, config: RunConfig) -> None:
         self.save_json(self.config_path, config)
 
-    def load_config(self) -> dict | None:
+    def load_config(self) -> RunConfig | None:
         if not self.config_path.exists():
             return None
-        return self.load_json(self.config_path)
+        return RunConfig.model_validate(self.load_json(self.config_path))
 
-    def should_reuse(self, path: Path, stored: dict | None, expected: dict) -> bool:
+    def should_reuse(
+        self, path: Path, stored: dict | BaseModel | None, expected: dict
+    ) -> bool:
         """Reuse ``path`` when it exists, force is off, and ``stored`` matches ``expected``."""
         if self.force or not path.exists() or stored is None:
             return False
-        return all(stored.get(key) == value for key, value in expected.items())
+        dumped = _as_dict(stored)
+        return all(dumped.get(key) == value for key, value in expected.items())
 
     @property
     def cleaned_path(self) -> Path:
@@ -117,13 +127,11 @@ class RunCheckpointer:
     def report_md_path(self) -> Path:
         return self.outdir / "report.md"
 
-    def run_complete(self, stored: dict | None, expected: dict) -> bool:
+    def run_complete(self, stored: RunConfig | None, expected: RunConfig) -> bool:
         if self.force or stored is None:
             return False
-        if not all(stored.get(key) == value for key, value in expected.items()):
+        if not self.should_reuse(
+            self.model_path, stored, expected.model_dump(exclude_none=True)
+        ):
             return False
-        return (
-            self.model_path.exists()
-            and self.meta_path.exists()
-            and self.report_json_path.exists()
-        )
+        return self.meta_path.exists() and self.report_json_path.exists()

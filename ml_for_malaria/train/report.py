@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import json
+from enum import StrEnum
 from pathlib import Path
 
 import numpy as np
@@ -12,16 +12,33 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 
-from ml_for_malaria.train.checkpoints import to_jsonable
+from ml_for_malaria.schemas import (
+    EvalMetrics,
+    FingerprintComparison,
+    FingerprintScore,
+    MetricRow,
+    MetricsTable,
+    SettingsTable,
+    TrainingReport,
+)
 
-_SKIP_REPORT_ROWS = ("accuracy", "macro avg", "weighted avg")
-_METRIC_ROWS = ("precision", "recall", "f1", "support")
+class SklearnReport(StrEnum):
+    """Keys from ``sklearn.metrics.classification_report(..., output_dict=True)``."""
+
+    ACCURACY = "accuracy"
+    MACRO_AVG = "macro avg"
+    WEIGHTED_AVG = "weighted avg"
+    F1_SCORE = "f1-score"
 
 
-def _metric_row(frame: pd.DataFrame, name: str) -> dict[str, float]:
+_METRIC_ROWS = tuple(MetricRow.model_fields)
+
+
+def _metric_row(frame: pd.DataFrame, name: str) -> MetricRow:
     if name not in frame.index:
-        return {col: 0.0 for col in _METRIC_ROWS}
-    return frame.loc[name, list(_METRIC_ROWS)].astype(float).to_dict()
+        return MetricRow(precision=0.0, recall=0.0, f1=0.0, support=0.0)
+    values = frame.loc[name, list(_METRIC_ROWS)].astype(float)
+    return MetricRow.model_validate(values.to_dict())
 
 
 def compute_test_metrics(
@@ -29,32 +46,41 @@ def compute_test_metrics(
     y_pred,
     y_proba,
     threshold: float = 0.5,
-) -> dict:
+) -> EvalMetrics:
     """Test-set metrics at a fixed probability threshold, plus ROC-AUC."""
     y_true = np.asarray(y_true)
     y_pred = np.asarray(y_pred)
     y_proba = np.asarray(y_proba)
 
+    skip_rows = (
+        SklearnReport.ACCURACY,
+        SklearnReport.MACRO_AVG,
+        SklearnReport.WEIGHTED_AVG,
+    )
     clf = pd.DataFrame(
         classification_report(y_true, y_pred, output_dict=True, zero_division=0)
-    ).T.rename(columns={"f1-score": "f1"})
-    per_class = (
-        clf.drop(index=clf.index.intersection(_SKIP_REPORT_ROWS))
-        .reindex(columns=list(_METRIC_ROWS))
-        .astype(float)
-        .rename(index=str)
-        .to_dict(orient="index")
-    )
-
-    return {
-        "threshold": threshold,
-        "accuracy": float(accuracy_score(y_true, y_pred)),
-        "roc_auc": float(roc_auc_score(y_true, y_proba)),
-        "per_class": per_class,
-        "macro": _metric_row(clf, "macro avg"),
-        "weighted": _metric_row(clf, "weighted avg"),
-        "confusion_matrix": confusion_matrix(y_true, y_pred).tolist(),
+    ).T.rename(columns={SklearnReport.F1_SCORE: MetricRow.f1})
+    per_class = {
+        str(label): MetricRow.model_validate(row)
+        for label, row in (
+            clf.drop(index=clf.index.intersection(skip_rows))
+            .reindex(columns=list(_METRIC_ROWS))
+            .astype(float)
+            .rename(index=str)
+            .to_dict(orient="index")
+            .items()
+        )
     }
+
+    return EvalMetrics(
+        threshold=threshold,
+        accuracy=float(accuracy_score(y_true, y_pred)),
+        roc_auc=float(roc_auc_score(y_true, y_proba)),
+        per_class=per_class,
+        macro=_metric_row(clf, SklearnReport.MACRO_AVG),
+        weighted=_metric_row(clf, SklearnReport.WEIGHTED_AVG),
+        confusion_matrix=confusion_matrix(y_true, y_pred).tolist(),
+    )
 
 
 def build_report(
@@ -66,22 +92,20 @@ def build_report(
     n_test: int,
     best_fingerprint: str,
     fingerprint_comparison: dict,
-    test_metrics: dict,
+    test_metrics: EvalMetrics,
     architecture: str | None = None,
-) -> dict:
-    payload = {
-        "split": split,
-        "seed": seed,
-        "test_size": test_size,
-        "n_train": n_train,
-        "n_test": n_test,
-        "best_fingerprint": best_fingerprint,
-        "fingerprint_comparison": fingerprint_comparison,
-        "test_metrics": test_metrics,
-    }
-    if architecture is not None:
-        payload["architecture"] = architecture
-    return to_jsonable(payload)
+) -> TrainingReport:
+    return TrainingReport(
+        split=split,
+        seed=seed,
+        test_size=test_size,
+        n_train=n_train,
+        n_test=n_test,
+        best_fingerprint=best_fingerprint,
+        fingerprint_comparison=fingerprint_comparison,
+        test_metrics=test_metrics,
+        architecture=architecture,
+    )
 
 
 def _markdown_table(
@@ -95,50 +119,57 @@ def _markdown_table(
     return frame.to_markdown(**kwargs)
 
 
-def _run_settings_frame(report: dict) -> pd.DataFrame:
+def _run_settings_frame(report: TrainingReport) -> pd.DataFrame:
     settings = pd.Series(
         {
-            "architecture": report.get("architecture"),
-            "split": report["split"],
-            "seed": report["seed"],
-            "test_size": report["test_size"],
-            "n_train": report["n_train"],
-            "n_test": report["n_test"],
-            "best_fingerprint": report["best_fingerprint"],
+            name: getattr(report, name)
+            for name in (
+                TrainingReport.architecture,
+                TrainingReport.split,
+                TrainingReport.seed,
+                TrainingReport.test_size,
+                TrainingReport.n_train,
+                TrainingReport.n_test,
+                TrainingReport.best_fingerprint,
+            )
         }
     ).dropna()
-    return settings.rename_axis("setting").reset_index(name="value")
-
-
-def _summary_metrics_frame(metrics: dict) -> pd.DataFrame:
-    return (
-        pd.Series(
-            {
-                "threshold": metrics.get("threshold", 0.5),
-                "accuracy": metrics["accuracy"],
-                "roc_auc": metrics["roc_auc"],
-            }
-        )
-        .rename_axis("metric")
-        .reset_index(name="value")
+    return settings.rename_axis(SettingsTable.setting).reset_index(
+        name=SettingsTable.value
     )
 
 
-def _class_names(metrics: dict) -> list[str]:
-    names = [str(name) for name in metrics.get("per_class", {})]
+def _summary_metrics_frame(metrics: EvalMetrics) -> pd.DataFrame:
+    return (
+        pd.Series(
+            {
+                EvalMetrics.threshold: metrics.threshold,
+                EvalMetrics.accuracy: metrics.accuracy,
+                EvalMetrics.roc_auc: metrics.roc_auc,
+            }
+        )
+        .rename_axis(MetricsTable.metric)
+        .reset_index(name=MetricsTable.value)
+    )
+
+
+def _class_names(metrics: EvalMetrics) -> list[str]:
+    names = [str(name) for name in metrics.per_class]
     preferred = [name for name in ("0", "1") if name in names]
     return preferred + [name for name in names if name not in preferred]
 
 
-def _per_class_frame(metrics: dict) -> pd.DataFrame:
-    table = pd.DataFrame(metrics.get("per_class", {})).reindex(columns=_class_names(metrics))
-    table["macro"] = pd.Series(metrics["macro"])
-    table["weighted"] = pd.Series(metrics["weighted"])
-    return table.reindex(_METRIC_ROWS).rename_axis("metric")
+def _per_class_frame(metrics: EvalMetrics) -> pd.DataFrame:
+    table = pd.DataFrame(
+        {name: row.model_dump() for name, row in metrics.per_class.items()}
+    ).reindex(columns=_class_names(metrics))
+    table[EvalMetrics.macro] = pd.Series(metrics.macro.model_dump())
+    table[EvalMetrics.weighted] = pd.Series(metrics.weighted.model_dump())
+    return table.reindex(_METRIC_ROWS).rename_axis(MetricsTable.metric)
 
 
-def _confusion_frame(metrics: dict) -> pd.DataFrame:
-    matrix = pd.DataFrame(metrics["confusion_matrix"])
+def _confusion_frame(metrics: EvalMetrics) -> pd.DataFrame:
+    matrix = pd.DataFrame(metrics.confusion_matrix)
     labels = _class_names(metrics)
     if len(labels) == len(matrix):
         matrix.index = [f"true_{label}" for label in labels]
@@ -146,27 +177,35 @@ def _confusion_frame(metrics: dict) -> pd.DataFrame:
     return matrix
 
 
-def _fingerprint_frame(comparison: dict) -> pd.DataFrame:
+def _fingerprint_frame(comparison: dict[str, FingerprintScore]) -> pd.DataFrame:
+    columns = [
+        FingerprintComparison.fingerprint,
+        FingerprintComparison.cv_auc,
+        FingerprintComparison.n_estimators,
+    ]
     if not comparison:
-        return pd.DataFrame(columns=["fingerprint", "cv_auc", "n_estimators"])
+        return pd.DataFrame(columns=columns)
     frame = (
-        pd.DataFrame.from_dict(comparison, orient="index")
-        .rename_axis("fingerprint")
+        pd.DataFrame.from_dict(
+            {name: score.model_dump() for name, score in comparison.items()},
+            orient="index",
+        )
+        .rename_axis(FingerprintComparison.fingerprint)
         .reset_index()
     )
-    columns = [
-        col for col in ("fingerprint", "cv_auc", "n_estimators") if col in frame.columns
-    ]
-    frame = frame.loc[:, columns]
-    if "n_estimators" in frame.columns:
-        frame["n_estimators"] = frame["n_estimators"].astype("Int64")
-    if "cv_auc" in frame.columns:
-        frame = frame.sort_values("cv_auc", ascending=False)
+    present = [col for col in columns if col in frame.columns]
+    frame = frame.loc[:, present]
+    if FingerprintComparison.n_estimators in frame.columns:
+        frame[FingerprintComparison.n_estimators] = frame[
+            FingerprintComparison.n_estimators
+        ].astype("Int64")
+    if FingerprintComparison.cv_auc in frame.columns:
+        frame = frame.sort_values(FingerprintComparison.cv_auc, ascending=False)
     return frame.reset_index(drop=True)
 
 
-def report_to_markdown(report: dict) -> str:
-    metrics = report["test_metrics"]
+def report_to_markdown(report: TrainingReport) -> str:
+    metrics = report.test_metrics
     return "\n".join(
         [
             "# Training report",
@@ -189,12 +228,12 @@ def report_to_markdown(report: dict) -> str:
             "",
             "## Fingerprint comparison (CV AUC)",
             "",
-            _markdown_table(_fingerprint_frame(report.get("fingerprint_comparison", {}))),
+            _markdown_table(_fingerprint_frame(report.fingerprint_comparison)),
             "",
         ]
     )
 
 
-def write_report(report: dict, json_path: Path, md_path: Path) -> None:
-    json_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+def write_report(report: TrainingReport, json_path: Path, md_path: Path) -> None:
+    json_path.write_text(report.model_dump_json(indent=2), encoding="utf-8")
     md_path.write_text(report_to_markdown(report), encoding="utf-8")

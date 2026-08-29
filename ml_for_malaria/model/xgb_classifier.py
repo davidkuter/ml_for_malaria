@@ -6,7 +6,7 @@ from loguru import logger
 from xgboost import XGBClassifier
 
 from ml_for_malaria.interpretation.shap import shap_feature_importance
-from ml_for_malaria.schemas import Predictions
+from ml_for_malaria.schemas import CleanedTrainingData, ModelMeta, Predictions
 from ml_for_malaria.train.checkpoints import RunCheckpointer
 from ml_for_malaria.train.featurization import (
     featurize_smiles,
@@ -22,7 +22,7 @@ class XGBFingerprintClassifier:
 
     architecture = ARCHITECTURE
 
-    def __init__(self, model: XGBClassifier, feature_generator, metadata: dict):
+    def __init__(self, model: XGBClassifier, feature_generator, metadata: ModelMeta):
         self.model = model
         self.feature_generator = feature_generator
         self.metadata = metadata
@@ -35,20 +35,20 @@ class XGBFingerprintClassifier:
             raise FileNotFoundError(
                 f"No saved model in {ckpt.outdir}. Expected model.ubj and model_meta.json"
             )
-        metadata = ckpt.load_json(ckpt.meta_path)
-        saved_arch = metadata.get("architecture", ARCHITECTURE)
-        if saved_arch != ARCHITECTURE:
+        metadata = ModelMeta.model_validate(ckpt.load_json(ckpt.meta_path))
+        if metadata.architecture != ARCHITECTURE:
             raise ValueError(
-                f"Run directory {ckpt.outdir} was trained with architecture={saved_arch!r}, "
+                f"Run directory {ckpt.outdir} was trained with "
+                f"architecture={metadata.architecture!r}, "
                 f"not {ARCHITECTURE!r}. Load it with the matching classifier class."
             )
         generator = get_fingerprint_generator(
-            metadata["fingerprint"], fp_size=int(metadata["fp_size"])
+            metadata.fingerprint, fp_size=int(metadata.fp_size)
         )
         model = XGBClassifier()
         model.load_model(str(ckpt.model_path))
         logger.debug(
-            f"Loaded XGBoost model from {ckpt.model_path} with {metadata['fingerprint']}"
+            f"Loaded XGBoost model from {ckpt.model_path} with {metadata.fingerprint}"
         )
         return cls(model=model, feature_generator=generator, metadata=metadata)
 
@@ -66,28 +66,30 @@ class XGBFingerprintClassifier:
         if self.model is None:
             raise RuntimeError("No model loaded")
 
-        df = pd.DataFrame({"INPUT_SMILES": pd.Series(smiles, dtype="object")})
-        df["SMILES"] = df["INPUT_SMILES"].map(
+        input_smiles = CleanedTrainingData.INPUT_SMILES
+        sanitized = CleanedTrainingData.SMILES
+        probability = Predictions.PROBABILITY
+        output_smiles = Predictions.SMILES
+
+        df = pd.DataFrame({input_smiles: pd.Series(smiles, dtype="object")})
+        df[sanitized] = df[input_smiles].map(
             lambda smi: sanitize_smiles(smi, as_mol=False)
         )
-        unique_smiles = df["SMILES"].dropna().drop_duplicates()
+        unique_smiles = df[sanitized].dropna().drop_duplicates()
         features = self.featurize(smiles=unique_smiles, sanitize=False)
+        output = df.drop(columns=sanitized).rename(
+            columns={input_smiles: output_smiles}
+        )
         if features.empty:
-            return Predictions.validate(
-                df.drop(columns="SMILES")
-                .rename(columns={"INPUT_SMILES": "SMILES"})
-                .assign(PROBABILITY=np.nan)
-            )
+            return Predictions.validate(output.assign(**{probability: np.nan}))
 
         probabilities = pd.Series(
             self.model.predict_proba(features)[:, -1],
             index=features.index,
-            name="PROBABILITY",
+            name=probability,
         )
-        df["PROBABILITY"] = df["SMILES"].map(probabilities)
-        return Predictions.validate(
-            df.drop(columns="SMILES").rename(columns={"INPUT_SMILES": "SMILES"})
-        )
+        output[probability] = df[sanitized].map(probabilities)
+        return Predictions.validate(output)
 
     def get_feature_importance(
         self, smiles: str, img_out: str | None = None
