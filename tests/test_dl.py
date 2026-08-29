@@ -28,6 +28,7 @@ def test_chemprop_smoke_with_gasteiger(tmp_path: Path):
         patience=1,
         accelerator="cpu",
         force=True,
+        n_jobs=2,
     )
     run = resolve_run_dir(
         tmp_path,

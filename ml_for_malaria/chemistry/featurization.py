@@ -21,7 +21,9 @@ _MOL_PARSE_ERRORS = (TypeError, ValueError, RuntimeError, MolSanitizeException)
 def sanitize_smiles(smiles: str, as_mol: bool = False) -> str | Chem.Mol | None:
     """Sanitise a SMILES string and optionally return an RDKit molecule.
 
-    Returns None if the input is not a string or sanitization fails.
+    Parses, strips salts/solvents, keeps the largest remaining fragment, then
+    standardises and uncharges. Returns None if the input is not a string or
+    sanitization fails.
     """
     if not isinstance(smiles, str) or not smiles.strip():
         logger.warning(f'"{smiles}" failed sanitization')
@@ -30,8 +32,13 @@ def sanitize_smiles(smiles: str, as_mol: bool = False) -> str | Chem.Mol | None:
         mol = dm.to_mol(smiles)
         if mol is None:
             raise ValueError("unparseable SMILES")
-        mol = dm.standardize_mol(mol)
-        if mol is None:
+        mol = dm.remove_salts_solvents(mol, dont_remove_everything=True)
+        if mol is None or mol.GetNumAtoms() == 0:
+            raise ValueError("salt stripping removed the molecule")
+        if len(Chem.GetMolFrags(mol)) > 1:
+            mol = dm.keep_largest_fragment(mol)
+        mol = dm.standardize_mol(mol, uncharge=True)
+        if mol is None or mol.GetNumAtoms() == 0:
             raise ValueError("standardization failed")
         if as_mol:
             return mol

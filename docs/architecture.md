@@ -81,7 +81,7 @@ from ml_for_malaria.report import write_comparison_report, compute_test_metrics
 from ml_for_malaria.split import get_splitter
 ```
 
-`charge_method` (`None` / `gasteiger` / `nagl`) is Chemprop-only extra atom features. ChemBERTa has no charge vector. Failed sanitize or charge assignment **drops** the molecule; do not impute `q=0` or a dummy structure.
+`charge_method` (`None` / `gasteiger` / `nagl`) is Chemprop-only extra atom features. ChemBERTa has no charge vector. Failed sanitize or charge assignment **drops** the molecule; do not impute `q=0` or a dummy structure. `nagl` is the `nagl` extra (`uv sync --extra nagl`); `require_charge_backend` fails before training if those packages are missing.
 
 ## Runs vs the library package
 

@@ -16,6 +16,14 @@ That creates `.venv`, installs runtime and `dev` dependencies, and installs the 
 uv sync --extra dl
 ```
 
+Chemprop `charge_method="nagl"` needs the OpenFF extra (GitHub sources; official PyPI wheels are yanked):
+
+```bash
+uv sync --extra dl --extra nagl
+```
+
+On Windows, enable Git long paths first (`git config --global core.longpaths true`) or the NAGL clone fails on long test filenames. Without the extra, use `charge_method="gasteiger"` or `None`.
+
 ```bash
 uv run pytest
 uv run ruff check .

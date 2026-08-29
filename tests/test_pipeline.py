@@ -47,6 +47,12 @@ def test_run_dirname_encodes_architecture_split_and_charge():
         )
         == "chemprop_scaffold_gasteiger"
     )
+    assert (
+        run_dirname(
+            Architecture.CHEMPROP, "scaffold", charge_method=ChargeMethod.NAGL
+        )
+        == "chemprop_scaffold_nagl"
+    )
     assert run_dirname(Architecture.CHEMBERTA, "scaffold") == "chemberta_scaffold"
     parent = Path("runs")
     assert (
@@ -133,6 +139,26 @@ def test_sanitize_smiles_returns_none_on_failure():
     assert sanitize_smiles("not-a-smiles") is None
     assert sanitize_smiles(None) is None  # type: ignore[arg-type]
     assert isinstance(sanitize_smiles("CCO"), str)
+
+
+def test_sanitize_smiles_strips_salts_and_disconnected_fragments():
+    assert sanitize_smiles("CCO") == "CCO"
+    assert sanitize_smiles("Cl.CCO") == "CCO"
+    assert sanitize_smiles("OC(=O)C(F)(F)F.CCO") == "CCO"
+    parent = (
+        "CC(C)(NC(=O)C1=CC=CN=C1)C1=NC(=C(N1)C1=CC=NC=C1)C1=CC=C(Cl)C(O)=C1"
+    )
+    salted = f"Cl.{parent}"
+    assert sanitize_smiles(salted) == sanitize_smiles(parent)
+    assert "." not in sanitize_smiles(salted)
+    assert sanitize_smiles("CCCCCCCC.C") == "CCCCCCCC"
+
+
+def test_sanitize_smiles_neutralizes_charges():
+    assert sanitize_smiles("CC(=O)[O-]") == sanitize_smiles("CC(=O)O") == "CC(=O)O"
+    assert sanitize_smiles("[Na+].CC(=O)[O-]") == "CC(=O)O"
+    assert sanitize_smiles("[NH3+]CC(=O)[O-]") == sanitize_smiles("NCC(=O)O")
+    assert sanitize_smiles("C[NH+](C)C") == sanitize_smiles("CN(C)C")
 
 
 def test_featurize_skips_failed_mols_without_misindexing():

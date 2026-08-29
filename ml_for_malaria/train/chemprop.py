@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shutil
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -8,20 +9,21 @@ import numpy as np
 import pandas as pd
 from loguru import logger
 
-from ml_for_malaria.chemistry.charges import parse_charge_method
+from ml_for_malaria.chemistry.charges import parse_charge_method, require_charge_backend
 from ml_for_malaria.model.chemprop_classifier import (
     ARCHITECTURE,
     ChempropClassifier,
     binary_mol_probabilities,
+    build_datapoints,
     build_featurizer,
     extra_atom_fdim,
     graph_batch_to_device,
-    molecule_datapoint,
     n_mols_in_graph_batch,
 )
 from ml_for_malaria.report import build_report, compute_test_metrics, write_report
 from ml_for_malaria.runs.paths import resolve_run_dir
 from ml_for_malaria.schemas import (
+    ChargeMethod,
     CleanedTrainingData,
     ModelMeta,
     RunConfig,
@@ -109,15 +111,17 @@ def _datapoints_for_indices(
     cleaned: pd.DataFrame,
     indices: list[int],
     charge_method: str | None,
+    n_jobs: int,
 ) -> tuple[list, list[int]]:
     smiles_col = CleanedTrainingData.SMILES
     label_col = CleanedTrainingData.LABEL
+    subset = cleaned.iloc[list(indices)]
+    smiles = subset[smiles_col].tolist()
+    labels = subset[label_col].astype(float).tolist()
+    built = build_datapoints(smiles, labels, charge_method, n_jobs=n_jobs)
     points = []
     kept = []
-    for idx in indices:
-        smi = cleaned.iloc[idx][smiles_col]
-        label = cleaned.iloc[idx][label_col]
-        point = molecule_datapoint(smi, y=float(label), charge_method=charge_method)
+    for idx, point in zip(indices, built):
         if point is None:
             continue
         points.append(point)
@@ -164,11 +168,13 @@ def train_chemprop_classifier(
     depth: int = DEFAULT_DEPTH,
     patience: int = DEFAULT_PATIENCE,
     accelerator: str = "auto",
+    n_jobs: int | None = None,
 ) -> ChempropTrainResult:
     """Train a Chemprop D-MPNN on the shared clean/split protocol.
 
     ``outdir`` is the parent runs directory; artifacts go in
     ``{outdir}/{arch}_{split}`` or ``{outdir}/{arch}_{split}_{charge}``.
+    ``n_jobs`` defaults to all cores for NAGL charges and 1 otherwise.
     """
     (
         pl,
@@ -182,6 +188,12 @@ def train_chemprop_classifier(
         ModelCheckpoint,
     ) = _require_lightning_chemprop()
     charge_method = parse_charge_method(charge_method)
+    if n_jobs is not None:
+        workers = n_jobs
+    elif charge_method == ChargeMethod.NAGL:
+        workers = -1
+    else:
+        workers = 1
     outdir = resolve_run_dir(outdir, ARCHITECTURE, split, charge_method=charge_method)
     prepared = prepare_training_run(
         df,
@@ -212,13 +224,28 @@ def train_chemprop_classifier(
             classifier=classifier, report=report, outdir=ckpt.outdir
         )
 
+    require_charge_backend(charge_method)
     cleaned = prepared.cleaned
     y = cleaned[CleanedTrainingData.LABEL]
     fit_idx, val_idx = train_val_indices(prepared.train_idx, y, seed=seed)
-    train_points, train_kept = _datapoints_for_indices(cleaned, fit_idx, charge_method)
-    val_points, val_kept = _datapoints_for_indices(cleaned, val_idx, charge_method)
+    charge_note = f" with {charge_method} charges" if charge_method else ""
+    logger.info(
+        f"Building Chemprop graphs{charge_note} "
+        f"(fit={len(fit_idx)}, val={len(val_idx)}, test={len(prepared.test_idx)}, "
+        f"n_jobs={workers})"
+    )
+    started = time.perf_counter()
+    train_points, train_kept = _datapoints_for_indices(
+        cleaned, fit_idx, charge_method, workers
+    )
+    val_points, val_kept = _datapoints_for_indices(
+        cleaned, val_idx, charge_method, workers
+    )
     test_points, test_kept = _datapoints_for_indices(
-        cleaned, prepared.test_idx, charge_method
+        cleaned, prepared.test_idx, charge_method, workers
+    )
+    logger.info(
+        f"Finished Chemprop graphs in {time.perf_counter() - started:.1f}s"
     )
     dropped_fit = len(fit_idx) - len(train_kept)
     dropped_val = len(val_idx) - len(val_kept)

@@ -6,7 +6,11 @@ import numpy as np
 import pandas as pd
 from loguru import logger
 
-from ml_for_malaria.chemistry.charges import ChargeAssignmentError, atom_charges
+from ml_for_malaria.chemistry.charges import (
+    ChargeAssignmentError,
+    atom_charges,
+    require_charge_backend,
+)
 from ml_for_malaria.model.predict import prepare_predict_smiles
 from ml_for_malaria.runs.checkpoints import RunCheckpointer
 from ml_for_malaria.schemas import Architecture, ModelMeta, Predictions
@@ -102,6 +106,29 @@ def molecule_datapoint(smiles: str, y: float | None, charge_method: str | None):
     return point
 
 
+def build_datapoints(
+    smiles: list[str],
+    y: list[float] | None,
+    charge_method: str | None,
+    n_jobs: int = 1,
+) -> list:
+    """Build Chemprop datapoints; ``n_jobs != 1`` uses joblib (needed for NAGL)."""
+    if y is not None and len(y) != len(smiles):
+        raise ValueError("y must be the same length as smiles")
+    labels = y if y is not None else [None] * len(smiles)
+    if n_jobs == 1 or len(smiles) < 2:
+        return [
+            molecule_datapoint(smi, lab, charge_method)
+            for smi, lab in zip(smiles, labels)
+        ]
+    from joblib import Parallel, delayed
+
+    return Parallel(n_jobs=n_jobs, prefer="threads")(
+        delayed(molecule_datapoint)(smi, lab, charge_method)
+        for smi, lab in zip(smiles, labels)
+    )
+
+
 def build_featurizer(charge_method: str | None):
     *_, SimpleMoleculeMolGraphFeaturizer, _ = _require_chemprop()
     fdim = extra_atom_fdim(charge_method)
@@ -155,6 +182,7 @@ class ChempropClassifier:
         if unique.empty:
             return Predictions.validate(output.assign(**{probability: np.nan}))
 
+        require_charge_backend(self.metadata.charge_method)
         kept: list[str] = []
         points = []
         for smi in unique:

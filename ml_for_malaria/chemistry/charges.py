@@ -1,12 +1,22 @@
 from __future__ import annotations
 
+import threading
+
 import numpy as np
+from loguru import logger
 from rdkit import Chem
 from rdkit.Chem import rdPartialCharges
 
 from ml_for_malaria.schemas import ChargeMethod
 
-NAGL_PARTIAL_CHARGE_METHOD = "openff-gnn-am1bcc-1.0.0"
+NAGL_PARTIAL_CHARGE_METHOD = "openff-gnn-am1bcc-1.0.0.pt"
+NAGL_INSTALL_HINT = (
+    "charge_method='nagl' requires OpenFF NAGL. Install the optional extra:\n"
+    "  uv sync --extra dl --extra nagl\n"
+    "Then retry, or use charge_method='gasteiger' / None."
+)
+_NAGL_LOCK = threading.Lock()
+_NAGL_GNN = None
 
 
 class ChargeAssignmentError(RuntimeError):
@@ -23,6 +33,35 @@ def parse_charge_method(method: str | None) -> str | None:
         raise ValueError(
             f"Unknown charge_method {method!r}. Supported: None, {supported}"
         ) from exc
+
+
+def require_charge_backend(method: str | None) -> None:
+    """Fail immediately if ``method`` needs a package that is not installed."""
+    parsed = parse_charge_method(method)
+    if parsed != ChargeMethod.NAGL:
+        return
+    try:
+        import openff.nagl  # noqa: F401
+        from openff.toolkit.topology import Molecule  # noqa: F401
+
+        _nagl_gnn()
+    except ImportError as exc:
+        raise ImportError(NAGL_INSTALL_HINT) from exc
+
+
+def _nagl_gnn():
+    """Load the NAGL GNN once; ``assign_partial_charges`` reloads it per molecule."""
+    global _NAGL_GNN
+    with _NAGL_LOCK:
+        if _NAGL_GNN is None:
+            from openff.nagl import GNNModel
+            from openff.nagl_models._dynamic_fetch import get_model
+
+            logger.info(f"Loading NAGL charge model {NAGL_PARTIAL_CHARGE_METHOD}")
+            path = get_model(filename=NAGL_PARTIAL_CHARGE_METHOD)
+            _NAGL_GNN = GNNModel.load(path, eval_mode=True)
+            logger.info("NAGL charge model ready")
+        return _NAGL_GNN
 
 
 def atom_charges(mol: Chem.Mol, method: str) -> np.ndarray:
@@ -51,16 +90,28 @@ def _gasteiger_charges(mol: Chem.Mol) -> np.ndarray:
 
 
 def _nagl_charges(mol: Chem.Mol) -> np.ndarray:
+    require_charge_backend(ChargeMethod.NAGL)
+    from openff.toolkit.topology import Molecule
+    from openff.units import Quantity, unit
+
     try:
-        from openff.toolkit.topology import Molecule
-    except ImportError as exc:
-        raise ImportError(
-            "NAGL charges require OpenFF NAGL (conda-forge: openff-nagl, "
-            "openff-nagl-models, and openff-toolkit). It is not a pip-only extra."
-        ) from exc
-    try:
+        import torch
+
         offmol = Molecule.from_rdkit(mol, allow_undefined_stereo=True)
-        offmol.assign_partial_charges(partial_charge_method=NAGL_PARTIAL_CHARGE_METHOD)
+        model = _nagl_gnn()
+        with torch.inference_mode():
+            raw = model.compute_property(
+                offmol,
+                as_numpy=True,
+                readout_name="am1bcc_charges",
+                check_domains=False,
+                error_if_unsupported=False,
+            )
+        offmol.partial_charges = Quantity(
+            np.asarray(raw, dtype=np.float64),
+            unit.elementary_charge,
+        )
+        offmol._normalize_partial_charges()
         charges = offmol.partial_charges
         if charges is None:
             raise ChargeAssignmentError("NAGL returned no partial charges")
@@ -69,8 +120,43 @@ def _nagl_charges(mol: Chem.Mol) -> np.ndarray:
         raise
     except (ValueError, RuntimeError, AttributeError, TypeError) as exc:
         raise ChargeAssignmentError("NAGL charge assignment failed") from exc
-    if values.size != mol.GetNumAtoms() or not np.isfinite(values).all():
+    aligned = _align_nagl_charges_to_rdkit(mol, offmol, values)
+    if aligned.size != mol.GetNumAtoms() or not np.isfinite(aligned).all():
         raise ChargeAssignmentError(
             "NAGL charges do not align with RDKit atom order or are non-finite"
         )
-    return values.reshape(-1, 1)
+    return aligned.reshape(-1, 1)
+
+
+def _align_nagl_charges_to_rdkit(mol: Chem.Mol, offmol, values: np.ndarray) -> np.ndarray:
+    """Map all-atom NAGL charges onto the RDKit mol Chemprop featurizes.
+
+    OpenFF adds hydrogens before NAGL; Chemprop defaults to implicit-H graphs.
+    Extra hydrogen charges are summed onto the bonded heavy atom.
+    """
+    n_rdkit = mol.GetNumAtoms()
+    if values.size == n_rdkit:
+        return values.astype(np.float64, copy=False)
+    if values.size != offmol.n_atoms or values.size < n_rdkit:
+        raise ChargeAssignmentError(
+            "NAGL charges do not align with RDKit atom order or are non-finite"
+        )
+    for idx, atom in enumerate(mol.GetAtoms()):
+        if int(offmol.atom(idx).atomic_number) != atom.GetAtomicNum():
+            raise ChargeAssignmentError(
+                "NAGL charges do not align with RDKit atom order or are non-finite"
+            )
+    aligned = np.array(values[:n_rdkit], dtype=np.float64, copy=True)
+    for idx in range(n_rdkit, offmol.n_atoms):
+        off_atom = offmol.atom(idx)
+        if int(off_atom.atomic_number) != 1:
+            raise ChargeAssignmentError(
+                "NAGL charges do not align with RDKit atom order or are non-finite"
+            )
+        parents = [bonded.molecule_atom_index for bonded in off_atom.bonded_atoms]
+        if len(parents) != 1 or parents[0] >= n_rdkit:
+            raise ChargeAssignmentError(
+                "NAGL charges do not align with RDKit atom order or are non-finite"
+            )
+        aligned[parents[0]] += values[idx]
+    return aligned

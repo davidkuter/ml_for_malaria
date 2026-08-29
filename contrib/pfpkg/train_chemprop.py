@@ -28,7 +28,7 @@ result = train_chemprop_classifier(
     split="scaffold",
     seed=42,
     # charge_method: None (no extra atom charges), "gasteiger", or "nagl"
-    charge_method=None,
+    charge_method="nagl",
     force=False,
 )
 logger.info(f"Wrote report to {result.outdir / 'report.md'}")

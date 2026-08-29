@@ -2,6 +2,7 @@ from ml_for_malaria.chemistry.charges import (
     ChargeAssignmentError,
     atom_charges,
     parse_charge_method,
+    require_charge_backend,
 )
 from ml_for_malaria.chemistry.featurization import (
     DEFAULT_FP_SIZE,
@@ -25,5 +26,6 @@ __all__ = [
     "get_fingerprint_generator",
     "get_fingerprint_generators",
     "parse_charge_method",
+    "require_charge_backend",
     "sanitize_smiles",
 ]
