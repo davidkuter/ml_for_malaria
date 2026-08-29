@@ -37,7 +37,8 @@ def _require_transformers():
         )
     except ImportError as exc:
         raise ImportError(
-            "SMILES transformers require the optional 'dl' extra (torch, transformers)."
+            "SMILES transformers require the optional 'dl' extra "
+            "(torch, transformers). Install with: uv sync --extra dl"
         ) from exc
     return (
         torch,

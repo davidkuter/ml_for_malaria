@@ -10,7 +10,11 @@ This project is packaged with [uv](https://docs.astral.sh/uv/). From the repo ro
 uv sync
 ```
 
-That creates `.venv`, installs runtime and `dev` dependencies, and installs the package in editable mode. `activate.sh` is a local helper (gitignored) for WSL on a Windows drive; source it instead of `uv sync` when you have it.
+That creates `.venv`, installs runtime and `dev` dependencies, and installs the package in editable mode. `activate.sh` is a local helper (gitignored) for WSL on a Windows drive; source it instead of `uv sync` when you have it. ChemBERTa and Chemprop need the optional `dl` extra (torch, transformers, chemprop):
+
+```bash
+uv sync --extra dl
+```
 
 ```bash
 uv run pytest

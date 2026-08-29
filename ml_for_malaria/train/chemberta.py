@@ -44,7 +44,7 @@ def _require_trainer():
     except ImportError as exc:
         raise ImportError(
             "ChemBERTa training requires the optional 'dl' extra "
-            "(torch, transformers, accelerate)."
+            "(torch, transformers, accelerate). Install with: uv sync --extra dl"
         ) from exc
     return torch, Dataset, Trainer, TrainingArguments
 

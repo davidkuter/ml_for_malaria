@@ -63,6 +63,7 @@ class EvalMetrics(JsonModel):
     threshold: float
     accuracy: float
     roc_auc: float
+    pr_auc: float
     per_class: dict[str, MetricRow]
     macro: MetricRow
     weighted: MetricRow
@@ -162,6 +163,7 @@ class ComparisonRow(JsonModel):
     n_train: int
     n_test: int
     roc_auc: float
+    pr_auc: float
     accuracy: float
     f1_0: float
     f1_1: float
@@ -255,6 +257,7 @@ class FingerprintComparison(pa.DataFrameModel):
     cv_auc: Series[float]
     n_estimators: Series[int]
     roc_auc: Series[float]
+    pr_auc: Series[float]
     accuracy: Series[float]
     f1_0: Series[float]
     f1_1: Series[float]
@@ -289,6 +292,7 @@ class ComparisonTable(pa.DataFrameModel):
     n_train: Series[int]
     n_test: Series[int]
     roc_auc: Series[float]
+    pr_auc: Series[float]
     accuracy: Series[float]
     f1_0: Series[float]
     f1_1: Series[float]

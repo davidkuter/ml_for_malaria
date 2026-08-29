@@ -8,6 +8,7 @@ import pandas as pd
 from loguru import logger
 from sklearn.metrics import (
     accuracy_score,
+    average_precision_score,
     classification_report,
     confusion_matrix,
     roc_auc_score,
@@ -57,7 +58,7 @@ def compute_test_metrics(
     y_proba,
     threshold: float = 0.5,
 ) -> EvalMetrics:
-    """Test-set metrics at a fixed probability threshold, plus ROC-AUC."""
+    """Test-set metrics at a fixed probability threshold, plus ROC-AUC and PR-AUC."""
     y_true = np.asarray(y_true)
     y_pred = np.asarray(y_pred)
     y_proba = np.asarray(y_proba)
@@ -86,6 +87,7 @@ def compute_test_metrics(
         threshold=threshold,
         accuracy=float(accuracy_score(y_true, y_pred)),
         roc_auc=float(roc_auc_score(y_true, y_proba)),
+        pr_auc=float(average_precision_score(y_true, y_proba)),
         per_class=per_class,
         macro=_metric_row(clf, SklearnReport.MACRO_AVG),
         weighted=_metric_row(clf, SklearnReport.WEIGHTED_AVG),
@@ -167,6 +169,7 @@ def _summary_metrics_frame(metrics: EvalMetrics) -> pd.DataFrame:
                 EvalMetrics.threshold: metrics.threshold,
                 EvalMetrics.accuracy: metrics.accuracy,
                 EvalMetrics.roc_auc: metrics.roc_auc,
+                EvalMetrics.pr_auc: metrics.pr_auc,
             }
         )
         .rename_axis(MetricsTable.metric)
@@ -206,6 +209,7 @@ def _fingerprint_frame(comparison: dict[str, FingerprintScore]) -> pd.DataFrame:
         FingerprintComparison.cv_auc,
         FingerprintComparison.n_estimators,
         FingerprintComparison.roc_auc,
+        FingerprintComparison.pr_auc,
         FingerprintComparison.accuracy,
         FingerprintComparison.f1_0,
         FingerprintComparison.f1_1,
@@ -220,6 +224,9 @@ def _fingerprint_frame(comparison: dict[str, FingerprintScore]) -> pd.DataFrame:
             FingerprintComparison.n_estimators: score.n_estimators,
             FingerprintComparison.roc_auc: (
                 score.test_metrics.roc_auc if score.test_metrics is not None else np.nan
+            ),
+            FingerprintComparison.pr_auc: (
+                score.test_metrics.pr_auc if score.test_metrics is not None else np.nan
             ),
             FingerprintComparison.accuracy: (
                 score.test_metrics.accuracy
@@ -349,6 +356,7 @@ def _metrics_row(
         n_train=report.n_train,
         n_test=report.n_test,
         roc_auc=metrics.roc_auc,
+        pr_auc=metrics.pr_auc,
         accuracy=metrics.accuracy,
         f1_0=class_f1(metrics, ClassLabel.INACTIVE),
         f1_1=class_f1(metrics, ClassLabel.ACTIVE),
@@ -388,6 +396,7 @@ def _comparison_frame(rows: list[ComparisonRow]) -> pd.DataFrame:
         ComparisonTable.n_train,
         ComparisonTable.n_test,
         ComparisonTable.roc_auc,
+        ComparisonTable.pr_auc,
         ComparisonTable.accuracy,
         ComparisonTable.f1_0,
         ComparisonTable.f1_1,

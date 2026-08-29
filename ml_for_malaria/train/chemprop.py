@@ -58,7 +58,7 @@ def _require_lightning_chemprop():
     except ImportError as exc:
         raise ImportError(
             "Chemprop training requires the optional 'dl' extra "
-            "(chemprop, torch, lightning)."
+            "(chemprop, torch, lightning). Install with: uv sync --extra dl"
         ) from exc
     return (
         pl,

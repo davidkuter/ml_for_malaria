@@ -184,6 +184,7 @@ def test_compute_test_metrics_and_report_roundtrip(tmp_path: Path):
         EvalMetrics.threshold,
         EvalMetrics.accuracy,
         EvalMetrics.roc_auc,
+        EvalMetrics.pr_auc,
         EvalMetrics.per_class,
         EvalMetrics.macro,
         EvalMetrics.weighted,
@@ -206,6 +207,8 @@ def test_compute_test_metrics_and_report_roundtrip(tmp_path: Path):
     )
     markdown = report_to_markdown(report)
     assert EvalMetrics.roc_auc in markdown
+    assert EvalMetrics.pr_auc in markdown
+    assert 0.0 <= metrics.pr_auc <= 1.0
     assert "AtomPair" in markdown
     assert FingerprintComparison.fingerprint in markdown
     assert FingerprintComparison.f1_0 in markdown

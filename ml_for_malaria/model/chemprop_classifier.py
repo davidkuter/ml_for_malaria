@@ -23,7 +23,8 @@ def _require_chemprop():
         from chemprop.models import MPNN
     except ImportError as exc:
         raise ImportError(
-            "Chemprop requires the optional 'dl' extra (chemprop, torch)."
+            "Chemprop requires the optional 'dl' extra (chemprop, torch). "
+            "Install with: uv sync --extra dl"
         ) from exc
     return (
         MoleculeDatapoint,
