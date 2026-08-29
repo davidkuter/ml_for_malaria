@@ -1,10 +1,10 @@
-import numpy as np
 import pandas as pd
 import shap
 from loguru import logger
 from rdkit import Chem
 from rdkit.Chem.Draw import SimilarityMaps
 
+from ml_for_malaria.schemas import AtomShapWeights, ShapValues
 from ml_for_malaria.train.featurization import (
     featurize_smiles,
     get_bit_atom_map,
@@ -48,31 +48,28 @@ def shap_feature_importance(
                 "skipping SHAP image"
             )
         else:
-            atom_shap = {atom.GetIdx(): [] for atom in mol.GetAtoms()}
-            for bit, atoms in bit_map.items():
-                if bit not in shap_values.index:
-                    continue
-                val = shap_values.loc[bit, smiles]
-                if val != 0.0:
-                    for atom in atoms:
-                        if atom in atom_shap:
-                            atom_shap[atom].append(val)
-
-            weights = {}
-            for atom, values in atom_shap.items():
-                weights[atom] = 0 if len(values) == 0 else float(np.median(values))
-
-            max_contrib = max((abs(val) for val in weights.values()), default=0.0)
-            if max_contrib == 0:
-                weights = {atom: 0.0 for atom in weights}
+            records = [
+                {"atom": atom, "shap": float(shap_values.loc[bit, smiles])}
+                for bit, atoms in bit_map.items()
+                if bit in shap_values.index and shap_values.loc[bit, smiles] != 0.0
+                for atom in atoms
+            ]
+            n_atoms = mol.GetNumAtoms()
+            if records:
+                weights = (
+                    AtomShapWeights.validate(pd.DataFrame(records))
+                    .groupby("atom")["shap"]
+                    .median()
+                    .reindex(range(n_atoms), fill_value=0.0)
+                )
             else:
-                weights = {
-                    atom: round(weight / max_contrib, 3)
-                    for atom, weight in weights.items()
-                }
-
-            weights = dict(sorted(weights.items()))
-            fig = SimilarityMaps.GetSimilarityMapFromWeights(mol, weights)
+                weights = pd.Series(0.0, index=range(n_atoms))
+            scale = float(weights.abs().max())
+            if scale:
+                weights = (weights / scale).round(3)
+            fig = SimilarityMaps.GetSimilarityMapFromWeights(
+                mol, weights.sort_index().to_dict()
+            )
             fig.savefig(img_out, bbox_inches="tight")
 
-    return shap_values.sort_values(by=[smiles])
+    return ShapValues.validate(shap_values.sort_values(by=[smiles]))

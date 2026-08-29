@@ -93,42 +93,6 @@ def _sklearn_params(best: dict, seed: int, n_estimators: int) -> dict:
     }
 
 
-def _cv_native_params(sklearn_params: dict) -> dict:
-    params = {
-        "objective": sklearn_params["objective"],
-        "alpha": sklearn_params["alpha"],
-        "gamma": sklearn_params["gamma"],
-        "reg_lambda": sklearn_params["reg_lambda"],
-        "colsample_bytree": sklearn_params["colsample_bytree"],
-        "min_child_weight": sklearn_params["min_child_weight"],
-        "max_depth": sklearn_params["max_depth"],
-        "learning_rate": sklearn_params["learning_rate"],
-        "seed": sklearn_params["seed"],
-        "eval_metric": "auc",
-    }
-    return params
-
-
-def evaluate_cv(dtrain: xgb.DMatrix, sklearn_params: dict, seed: int) -> tuple[float, int]:
-    """Re-run CV with fitted params to get AUC and best n_estimators."""
-    results = xgb.cv(
-        dtrain=dtrain,
-        params=_cv_native_params(sklearn_params),
-        nfold=5,
-        num_boost_round=NUM_BOOST_ROUND,
-        early_stopping_rounds=EARLY_STOPPING_ROUNDS,
-        metrics="auc",
-        as_pandas=True,
-        seed=seed,
-    )
-    auc_series = results["test-auc-mean"]
-    if auc_series.isna().all():
-        return 0.0, 1
-    auc = float(auc_series.max())
-    n_estimators = int(auc_series.idxmax()) + 1
-    return auc, n_estimators
-
-
 def train_cross_validation_model(
     dtrain: xgb.DMatrix, seed: int, max_evals: int = HYPEROPT_EVALS
 ) -> dict:
@@ -157,9 +121,9 @@ def train_cross_validation_model(
         rstate=np.random.default_rng(seed),
     )
     best = _int_params(best)
-    auc, n_estimators = evaluate_cv(
-        dtrain, _sklearn_params(best, seed, n_estimators=100), seed
-    )
+    trial_result = trials.best_trial["result"]
+    auc = float(trial_result.get("auc", -trial_result["loss"]))
+    n_estimators = int(trial_result.get("n_estimators", 1))
     params = _sklearn_params(best, seed, n_estimators)
     return {"params": params, "cv_auc": auc, "n_estimators": n_estimators}
 
@@ -213,9 +177,7 @@ def train_xgb_classifier(
             outdir=ckpt.outdir,
         )
 
-    if ckpt.should_reuse(
-        ckpt.cleaned_path, stored, {"input_hash": input_hash}
-    ):
+    if ckpt.should_reuse(ckpt.cleaned_path, stored, {"input_hash": input_hash}):
         cleaned = ckpt.load_cleaned()
     else:
         logger.info("Cleaning training data")
@@ -243,17 +205,15 @@ def train_xgb_classifier(
     else:
         logger.info(f"Splitting data with strategy={split!r}")
         train_idx, test_idx = splitter.split(
-            smiles=cleaned["SMILES"].tolist(),
-            labels=cleaned["LABEL"].tolist(),
+            smiles=cleaned["SMILES"],
+            labels=cleaned["LABEL"],
             test_size=test_size,
             seed=seed,
         )
-        ckpt.save_json(
-            split_file, {"train_idx": train_idx, "test_idx": test_idx}
-        )
+        ckpt.save_json(split_file, {"train_idx": train_idx, "test_idx": test_idx})
 
     generators = {name: available[name] for name in selected}
-    labels = cleaned["LABEL"].to_numpy()
+    y = cleaned["LABEL"]
     fingerprint_comparison: dict[str, dict] = {}
 
     for fp_name, generator in generators.items():
@@ -267,7 +227,7 @@ def train_xgb_classifier(
             features = ckpt.load_features(fp_name)
         else:
             features = featurize_smiles(
-                smiles=cleaned["SMILES"].tolist(),
+                smiles=cleaned["SMILES"],
                 fp_generator=generator,
                 sanitize=False,
             )
@@ -279,8 +239,7 @@ def train_xgb_classifier(
             features = features.reset_index(drop=True)
             ckpt.save_features(fp_name, features)
 
-        if list(features.index) != list(range(len(cleaned))):
-            features = features.reset_index(drop=True)
+        features = features.reset_index(drop=True)
 
         hp_path = ckpt.hyperopt_path(fp_name)
         if ckpt.should_reuse(
@@ -298,9 +257,10 @@ def train_xgb_classifier(
             logger.info(f"Loading hyperopt results from {hp_path}")
             hp_result = ckpt.load_json(hp_path)
         else:
-            x_train = features.iloc[train_idx]
-            y_train = labels[train_idx]
-            dtrain = xgb.DMatrix(data=x_train, label=y_train)
+            dtrain = xgb.DMatrix(
+                data=features.iloc[train_idx],
+                label=y.iloc[train_idx],
+            )
             hp_result = train_cross_validation_model(
                 dtrain=dtrain, seed=seed, max_evals=max_evals
             )
@@ -312,25 +272,18 @@ def train_xgb_classifier(
             "params": hp_result["params"],
         }
 
-    best_fingerprint = max(
-        fingerprint_comparison.keys(),
-        key=lambda name: fingerprint_comparison[name]["cv_auc"],
-    )
+    comparison = pd.DataFrame.from_dict(fingerprint_comparison, orient="index")
+    best_fingerprint = comparison["cv_auc"].idxmax()
     best = fingerprint_comparison[best_fingerprint]
-    logger.info(
-        f"Best fingerprint: {best_fingerprint}. CV AUC: {best['cv_auc']:.4f}"
-    )
+    logger.info(f"Best fingerprint: {best_fingerprint}. CV AUC: {best['cv_auc']:.4f}")
 
     features = ckpt.load_features(best_fingerprint)
-    if list(features.index) != list(range(len(cleaned))):
-        features = features.reset_index(drop=True)
-
     params = dict(best["params"])
     params["n_estimators"] = int(best["n_estimators"])
     x_train = features.iloc[train_idx]
-    y_train = labels[train_idx]
+    y_train = y.iloc[train_idx]
     x_test = features.iloc[test_idx]
-    y_test = labels[test_idx]
+    y_test = y.iloc[test_idx]
 
     logger.info("Validating model on held-out test split")
     xgb_clf = XGBClassifier(**params)
@@ -358,7 +311,7 @@ def train_xgb_classifier(
     write_report(report, ckpt.report_json_path, ckpt.report_md_path)
 
     logger.info("Fitting final model on the full dataset")
-    xgb_clf.fit(features, labels)
+    xgb_clf.fit(features, y)
     xgb_clf.save_model(str(ckpt.model_path))
     metadata = {
         "architecture": ARCHITECTURE,

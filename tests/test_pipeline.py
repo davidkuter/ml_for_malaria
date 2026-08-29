@@ -23,21 +23,26 @@ def test_scaffold_splitter_is_a_stub():
     splitter = get_splitter("scaffold")
     assert isinstance(splitter, ScaffoldSplitter)
     with pytest.raises(NotImplementedError, match="Bemis–Murcko"):
-        splitter.split(["CCO", "CCC"], [0, 1], test_size=0.5, seed=0)
+        splitter.split(
+            pd.Series(["CCO", "CCC"]),
+            pd.Series([0, 1]),
+            test_size=0.5,
+            seed=0,
+        )
 
 
 def test_random_splitter_is_stratified():
-    smiles = [f"C{'C' * i}" for i in range(20)]
-    labels = [0] * 10 + [1] * 10
+    smiles = pd.Series([f"C{'C' * i}" for i in range(20)])
+    labels = pd.Series([0] * 10 + [1] * 10)
     train_idx, test_idx = get_splitter("random").split(
         smiles, labels, test_size=0.2, seed=42
     )
     assert len(train_idx) == 16
     assert len(test_idx) == 4
     assert set(train_idx).isdisjoint(test_idx)
-    test_labels = [labels[i] for i in test_idx]
-    assert test_labels.count(0) == 2
-    assert test_labels.count(1) == 2
+    test_labels = labels.iloc[test_idx]
+    assert int((test_labels == 0).sum()) == 2
+    assert int((test_labels == 1).sum()) == 2
 
 
 def test_encode_binary_labels_rejects_unknown():
@@ -117,6 +122,9 @@ def test_compute_test_metrics_and_report_roundtrip(tmp_path: Path):
     markdown = report_to_markdown(report)
     assert "roc_auc" in markdown
     assert "AtomPair" in markdown
+    assert "fingerprint" in markdown
+    assert "true_0" in markdown
+    assert "pred_1" in markdown
 
 
 def test_checkpointer_reuses_matching_config(tmp_path: Path):

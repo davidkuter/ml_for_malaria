@@ -1,6 +1,6 @@
 from typing import Protocol
 
-import numpy as np
+import pandas as pd
 from sklearn.model_selection import train_test_split
 
 
@@ -11,12 +11,12 @@ class Splitter(Protocol):
 
     def split(
         self,
-        smiles: list[str],
-        labels: list[int],
+        smiles: pd.Series,
+        labels: pd.Series,
         test_size: float,
         seed: int,
     ) -> tuple[list[int], list[int]]:
-        """Return (train_indices, test_indices) into the aligned smiles/labels lists."""
+        """Return (train_indices, test_indices) aligned with ``smiles`` / ``labels``."""
         ...
 
 
@@ -27,14 +27,15 @@ class RandomSplitter:
 
     def split(
         self,
-        smiles: list[str],
-        labels: list[int],
+        smiles: pd.Series,
+        labels: pd.Series,
         test_size: float,
         seed: int,
     ) -> tuple[list[int], list[int]]:
-        indices = np.arange(len(smiles))
+        del smiles  # same compounds for every fingerprint; grouping comes later
+        positions = pd.RangeIndex(len(labels))
         train_idx, test_idx = train_test_split(
-            indices,
+            positions,
             test_size=test_size,
             random_state=seed,
             stratify=labels,
@@ -56,8 +57,8 @@ class ScaffoldSplitter:
 
     def split(
         self,
-        smiles: list[str],
-        labels: list[int],
+        smiles: pd.Series,
+        labels: pd.Series,
         test_size: float,
         seed: int,
     ) -> tuple[list[int], list[int]]:

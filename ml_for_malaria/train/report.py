@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 from sklearn.metrics import (
     accuracy_score,
     classification_report,
@@ -12,6 +13,15 @@ from sklearn.metrics import (
 )
 
 from ml_for_malaria.train.checkpoints import to_jsonable
+
+_SKIP_REPORT_ROWS = ("accuracy", "macro avg", "weighted avg")
+_METRIC_ROWS = ("precision", "recall", "f1", "support")
+
+
+def _metric_row(frame: pd.DataFrame, name: str) -> dict[str, float]:
+    if name not in frame.index:
+        return {col: 0.0 for col in _METRIC_ROWS}
+    return frame.loc[name, list(_METRIC_ROWS)].astype(float).to_dict()
 
 
 def compute_test_metrics(
@@ -25,38 +35,25 @@ def compute_test_metrics(
     y_pred = np.asarray(y_pred)
     y_proba = np.asarray(y_proba)
 
-    report = classification_report(y_true, y_pred, output_dict=True, zero_division=0)
-    auc = float(roc_auc_score(y_true, y_proba))
-    cm = confusion_matrix(y_true, y_pred)
-
-    def _avg(name: str) -> dict:
-        row = report.get(name, {})
-        return {
-            "precision": float(row.get("precision", 0.0)),
-            "recall": float(row.get("recall", 0.0)),
-            "f1": float(row.get("f1-score", 0.0)),
-            "support": float(row.get("support", 0.0)),
-        }
-
-    per_class = {}
-    for key, value in report.items():
-        if key in {"accuracy", "macro avg", "weighted avg"}:
-            continue
-        per_class[str(key)] = {
-            "precision": float(value["precision"]),
-            "recall": float(value["recall"]),
-            "f1": float(value["f1-score"]),
-            "support": float(value["support"]),
-        }
+    clf = pd.DataFrame(
+        classification_report(y_true, y_pred, output_dict=True, zero_division=0)
+    ).T.rename(columns={"f1-score": "f1"})
+    per_class = (
+        clf.drop(index=clf.index.intersection(_SKIP_REPORT_ROWS))
+        .reindex(columns=list(_METRIC_ROWS))
+        .astype(float)
+        .rename(index=str)
+        .to_dict(orient="index")
+    )
 
     return {
         "threshold": threshold,
         "accuracy": float(accuracy_score(y_true, y_pred)),
-        "roc_auc": auc,
+        "roc_auc": float(roc_auc_score(y_true, y_proba)),
         "per_class": per_class,
-        "macro": _avg("macro avg"),
-        "weighted": _avg("weighted avg"),
-        "confusion_matrix": cm.tolist(),
+        "macro": _metric_row(clf, "macro avg"),
+        "weighted": _metric_row(clf, "weighted avg"),
+        "confusion_matrix": confusion_matrix(y_true, y_pred).tolist(),
     }
 
 
@@ -87,67 +84,115 @@ def build_report(
     return to_jsonable(payload)
 
 
+def _markdown_table(
+    frame: pd.DataFrame, *, index: bool = False, floatfmt: str | None = ".4f"
+) -> str:
+    if frame.empty:
+        return "_No data._"
+    kwargs: dict = {"index": index, "tablefmt": "github"}
+    if floatfmt is not None:
+        kwargs["floatfmt"] = floatfmt
+    return frame.to_markdown(**kwargs)
+
+
+def _run_settings_frame(report: dict) -> pd.DataFrame:
+    settings = pd.Series(
+        {
+            "architecture": report.get("architecture"),
+            "split": report["split"],
+            "seed": report["seed"],
+            "test_size": report["test_size"],
+            "n_train": report["n_train"],
+            "n_test": report["n_test"],
+            "best_fingerprint": report["best_fingerprint"],
+        }
+    ).dropna()
+    return settings.rename_axis("setting").reset_index(name="value")
+
+
+def _summary_metrics_frame(metrics: dict) -> pd.DataFrame:
+    return (
+        pd.Series(
+            {
+                "threshold": metrics.get("threshold", 0.5),
+                "accuracy": metrics["accuracy"],
+                "roc_auc": metrics["roc_auc"],
+            }
+        )
+        .rename_axis("metric")
+        .reset_index(name="value")
+    )
+
+
+def _class_names(metrics: dict) -> list[str]:
+    names = [str(name) for name in metrics.get("per_class", {})]
+    preferred = [name for name in ("0", "1") if name in names]
+    return preferred + [name for name in names if name not in preferred]
+
+
+def _per_class_frame(metrics: dict) -> pd.DataFrame:
+    table = pd.DataFrame(metrics.get("per_class", {})).reindex(columns=_class_names(metrics))
+    table["macro"] = pd.Series(metrics["macro"])
+    table["weighted"] = pd.Series(metrics["weighted"])
+    return table.reindex(_METRIC_ROWS).rename_axis("metric")
+
+
+def _confusion_frame(metrics: dict) -> pd.DataFrame:
+    matrix = pd.DataFrame(metrics["confusion_matrix"])
+    labels = _class_names(metrics)
+    if len(labels) == len(matrix):
+        matrix.index = [f"true_{label}" for label in labels]
+        matrix.columns = [f"pred_{label}" for label in labels]
+    return matrix
+
+
+def _fingerprint_frame(comparison: dict) -> pd.DataFrame:
+    if not comparison:
+        return pd.DataFrame(columns=["fingerprint", "cv_auc", "n_estimators"])
+    frame = (
+        pd.DataFrame.from_dict(comparison, orient="index")
+        .rename_axis("fingerprint")
+        .reset_index()
+    )
+    columns = [
+        col for col in ("fingerprint", "cv_auc", "n_estimators") if col in frame.columns
+    ]
+    frame = frame.loc[:, columns]
+    if "n_estimators" in frame.columns:
+        frame["n_estimators"] = frame["n_estimators"].astype("Int64")
+    if "cv_auc" in frame.columns:
+        frame = frame.sort_values("cv_auc", ascending=False)
+    return frame.reset_index(drop=True)
+
+
 def report_to_markdown(report: dict) -> str:
     metrics = report["test_metrics"]
-    per_class = metrics.get("per_class", {})
-    class_names = sorted(per_class.keys(), key=lambda x: (x != "0", x != "1", x))
-
-    header = "| metric | " + " | ".join(class_names + ["macro", "weighted"]) + " |"
-    sep = "| --- | " + " | ".join("---" for _ in class_names + ["macro", "weighted"]) + " |"
-
-    def _row(metric: str) -> str:
-        cells = [metric]
-        for name in class_names:
-            cells.append(f"{per_class[name][metric]:.4f}")
-        cells.append(f"{metrics['macro'][metric]:.4f}")
-        cells.append(f"{metrics['weighted'][metric]:.4f}")
-        return "| " + " | ".join(cells) + " |"
-
-    fp_lines = [
-        "| fingerprint | cv_auc | n_estimators |",
-        "| --- | --- | --- |",
-    ]
-    comparison = report.get("fingerprint_comparison", {})
-    for name, info in sorted(
-        comparison.items(), key=lambda item: item[1].get("cv_auc", 0), reverse=True
-    ):
-        fp_lines.append(
-            f"| {name} | {info.get('cv_auc', 0):.4f} | {info.get('n_estimators', '')} |"
-        )
-
-    arch_line = []
-    if report.get("architecture"):
-        arch_line = [f"- architecture: `{report['architecture']}`"]
-
-    lines = [
-        "# Training report",
-        "",
-        *arch_line,
-        f"- split: `{report['split']}`",
-        f"- seed: {report['seed']}",
-        f"- test_size: {report['test_size']}",
-        f"- n_train: {report['n_train']}",
-        f"- n_test: {report['n_test']}",
-        f"- best_fingerprint: `{report['best_fingerprint']}`",
-        "",
-        f"## Test metrics (threshold {metrics.get('threshold', 0.5)})",
-        "",
-        f"- accuracy: {metrics['accuracy']:.4f}",
-        f"- roc_auc: {metrics['roc_auc']:.4f}",
-        "",
-        header,
-        sep,
-        _row("precision"),
-        _row("recall"),
-        _row("f1"),
-        _row("support"),
-        "",
-        "## Fingerprint comparison (CV AUC)",
-        "",
-        *fp_lines,
-        "",
-    ]
-    return "\n".join(lines)
+    return "\n".join(
+        [
+            "# Training report",
+            "",
+            "## Run",
+            "",
+            _markdown_table(_run_settings_frame(report)),
+            "",
+            "## Test metrics",
+            "",
+            _markdown_table(_summary_metrics_frame(metrics)),
+            "",
+            "### Per class",
+            "",
+            _markdown_table(_per_class_frame(metrics), index=True),
+            "",
+            "### Confusion matrix",
+            "",
+            _markdown_table(_confusion_frame(metrics), index=True, floatfmt=None),
+            "",
+            "## Fingerprint comparison (CV AUC)",
+            "",
+            _markdown_table(_fingerprint_frame(report.get("fingerprint_comparison", {}))),
+            "",
+        ]
+    )
 
 
 def write_report(report: dict, json_path: Path, md_path: Path) -> None:

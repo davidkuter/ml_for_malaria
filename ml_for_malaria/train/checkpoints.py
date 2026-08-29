@@ -9,6 +9,8 @@ import numpy as np
 import pandas as pd
 from loguru import logger
 
+from ml_for_malaria.schemas import CleanedTrainingData, FingerprintFeatures
+
 
 def data_hash(df: pd.DataFrame, columns: list[str]) -> str:
     """Stable hash of selected dataframe columns."""
@@ -63,9 +65,6 @@ class RunCheckpointer:
             return None
         return self.load_json(self.config_path)
 
-    def _cached(self, path: Path) -> bool:
-        return (not self.force) and path.exists()
-
     def should_reuse(self, path: Path, stored: dict | None, expected: dict) -> bool:
         """Reuse ``path`` when it exists, force is off, and ``stored`` matches ``expected``."""
         if self.force or not path.exists() or stored is None:
@@ -78,10 +77,10 @@ class RunCheckpointer:
 
     def load_cleaned(self) -> pd.DataFrame:
         logger.info(f"Loading cleaned data from {self.cleaned_path}")
-        return pd.read_parquet(self.cleaned_path)
+        return CleanedTrainingData.validate(pd.read_parquet(self.cleaned_path))
 
     def save_cleaned(self, df: pd.DataFrame) -> None:
-        df.to_parquet(self.cleaned_path, index=False)
+        CleanedTrainingData.validate(df).to_parquet(self.cleaned_path, index=False)
 
     def split_path(self, split: str, seed: int) -> Path:
         return self.outdir / "splits" / f"{split}_seed{seed}.json"
@@ -94,10 +93,10 @@ class RunCheckpointer:
         logger.info(f"Loading features from {path}")
         features = pd.read_parquet(path)
         features.columns = [int(col) for col in features.columns]
-        return features.reset_index(drop=True)
+        return FingerprintFeatures.validate(features.reset_index(drop=True))
 
     def save_features(self, fp_name: str, features: pd.DataFrame) -> None:
-        features.to_parquet(self.features_path(fp_name))
+        FingerprintFeatures.validate(features).to_parquet(self.features_path(fp_name))
 
     def hyperopt_path(self, fp_name: str) -> Path:
         return self.outdir / "hyperopt" / f"{fp_name}.json"

@@ -7,8 +7,9 @@ from ml_for_malaria.train import train_xgb_classifier
 from ml_for_malaria.train.featurization import encode_binary_labels
 
 ROOT = Path(__file__).resolve().parents[2]
-DATASET_PATH = ROOT / "data" / "azole" / "100nM_Training_Set.csv"
-OUTDIR = ROOT / "runs" / "azole_100nM"
+AZOLE = ROOT / "data" / "azole"
+DATASET_PATH = AZOLE / "input" / "100nM_Training_Set.csv"
+OUTDIR = AZOLE / "runs"
 
 logger.info(f"Loading data from: {DATASET_PATH}")
 df_input = pd.read_csv(DATASET_PATH)

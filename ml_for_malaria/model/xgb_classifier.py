@@ -1,10 +1,12 @@
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 from loguru import logger
 from xgboost import XGBClassifier
 
 from ml_for_malaria.interpretation.shap import shap_feature_importance
+from ml_for_malaria.schemas import Predictions
 from ml_for_malaria.train.checkpoints import RunCheckpointer
 from ml_for_malaria.train.featurization import (
     featurize_smiles,
@@ -45,41 +47,47 @@ class XGBFingerprintClassifier:
         )
         model = XGBClassifier()
         model.load_model(str(ckpt.model_path))
-        logger.debug(f"Loaded XGBoost model from {ckpt.model_path} with {metadata['fingerprint']}")
+        logger.debug(
+            f"Loaded XGBoost model from {ckpt.model_path} with {metadata['fingerprint']}"
+        )
         return cls(model=model, feature_generator=generator, metadata=metadata)
 
-    def featurize(self, smiles: list[str], sanitize: bool = False) -> pd.DataFrame:
+    def featurize(
+        self, smiles: list[str] | pd.Series, sanitize: bool = False
+    ) -> pd.DataFrame:
         return featurize_smiles(
-            smiles=smiles, fp_generator=self.feature_generator, sanitize=sanitize
+            smiles=smiles,
+            fp_generator=self.feature_generator,
+            sanitize=sanitize,
         )
 
-    def predict(self, smiles: list[str]) -> pd.DataFrame:
+    def predict(self, smiles: list[str] | pd.Series) -> pd.DataFrame:
         """Predict the probability of the positive class for each input SMILES."""
         if self.model is None:
             raise RuntimeError("No model loaded")
 
-        df = pd.DataFrame(
-            {
-                "INPUT_SMILES": smiles,
-                "SMILES": [sanitize_smiles(smi, as_mol=False) for smi in smiles],
-            }
+        df = pd.DataFrame({"INPUT_SMILES": pd.Series(smiles, dtype="object")})
+        df["SMILES"] = df["INPUT_SMILES"].map(
+            lambda smi: sanitize_smiles(smi, as_mol=False)
         )
-        prepped_smiles = list(df["SMILES"].dropna().unique())
-        features = self.featurize(smiles=prepped_smiles, sanitize=False)
+        unique_smiles = df["SMILES"].dropna().drop_duplicates()
+        features = self.featurize(smiles=unique_smiles, sanitize=False)
         if features.empty:
-            df = df.drop(columns="SMILES")
-            df = df.rename(columns={"INPUT_SMILES": "SMILES"})
-            df["PROBABILITY"] = pd.NA
-            return df
+            return Predictions.validate(
+                df.drop(columns="SMILES")
+                .rename(columns={"INPUT_SMILES": "SMILES"})
+                .assign(PROBABILITY=np.nan)
+            )
 
-        results = self.model.predict_proba(features)
-        df_results = pd.DataFrame(
-            [(smi, float(prob[-1])) for smi, prob in zip(features.index, results)],
-            columns=["SMILES", "PROBABILITY"],
+        probabilities = pd.Series(
+            self.model.predict_proba(features)[:, -1],
+            index=features.index,
+            name="PROBABILITY",
         )
-        df = df.merge(df_results, on="SMILES", how="left")
-        df = df.drop(columns="SMILES")
-        return df.rename(columns={"INPUT_SMILES": "SMILES"})
+        df["PROBABILITY"] = df["SMILES"].map(probabilities)
+        return Predictions.validate(
+            df.drop(columns="SMILES").rename(columns={"INPUT_SMILES": "SMILES"})
+        )
 
     def get_feature_importance(
         self, smiles: str, img_out: str | None = None

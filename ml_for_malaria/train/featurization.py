@@ -11,6 +11,8 @@ from rdkit.Chem.rdFingerprintGenerator import (
     GetRDKitFPGenerator,
 )
 
+from ml_for_malaria.schemas import CleanedTrainingData, FingerprintFeatures
+
 DEFAULT_FP_SIZE = 2048
 
 
@@ -25,12 +27,10 @@ def sanitize_smiles(smiles: str, as_mol: bool = False) -> str | Chem.Mol | None:
     try:
         mol = dm.to_mol(smiles)
         if mol is None:
-            logger.warning(f'"{smiles}" failed sanitization')
-            return None
+            raise ValueError("unparseable SMILES")
         mol = dm.standardize_mol(mol)
         if mol is None:
-            logger.warning(f'"{smiles}" failed sanitization')
-            return None
+            raise ValueError("standardization failed")
         if as_mol:
             return mol
         return Chem.MolToSmiles(mol)
@@ -40,13 +40,14 @@ def sanitize_smiles(smiles: str, as_mol: bool = False) -> str | Chem.Mol | None:
 
 
 def featurize_smiles(
-    smiles: list[str], fp_generator, sanitize: bool = False
+    smiles: list[str] | pd.Series, fp_generator, sanitize: bool = False
 ) -> pd.DataFrame:
     """Featurize SMILES with an RDKit fingerprint generator.
 
     Rows that fail to parse are omitted. The index contains only the SMILES that
     succeeded, so callers must not assume ``len(result) == len(smiles)``.
     """
+    smiles = list(smiles)
     logger.info(f"Featurizing {len(smiles)} SMILES")
 
     rows: list[np.ndarray] = []
@@ -70,9 +71,11 @@ def featurize_smiles(
         index.append(smi)
 
     if not rows:
-        return pd.DataFrame(index=index)
+        return FingerprintFeatures.validate(pd.DataFrame(index=index))
 
-    return pd.DataFrame(rows, columns=list(range(len(rows[0]))), index=index)
+    return FingerprintFeatures.validate(
+        pd.DataFrame(rows, columns=list(range(len(rows[0]))), index=index)
+    )
 
 
 def get_fingerprint_generators(fp_size: int = DEFAULT_FP_SIZE) -> dict:
@@ -132,11 +135,12 @@ def encode_binary_labels(
     inactive_label: str = "Inactive",
 ) -> pd.Series:
     """Map two string labels to 1/0. Raises if unexpected values are present."""
-    allowed = {active_label, inactive_label}
-    extra = set(series.dropna().unique()) - allowed
-    if extra:
+    known = series.dropna()
+    unexpected = known.loc[~known.isin([active_label, inactive_label])]
+    if not unexpected.empty:
+        extra = sorted(unexpected.unique().tolist())
         raise ValueError(
-            f"Unexpected labels: {sorted(extra)}. "
+            f"Unexpected labels: {extra}. "
             f"Expected {active_label!r} or {inactive_label!r}."
         )
     return series.map({active_label: 1, inactive_label: 0})
@@ -158,16 +162,17 @@ def clean_training_data(df: pd.DataFrame) -> pd.DataFrame:
     cleaned = cleaned.dropna(subset=["SMILES", "LABEL"])
     cleaned["LABEL"] = cleaned["LABEL"].astype(int)
 
-    label_nunique = cleaned.groupby("SMILES")["LABEL"].nunique()
-    conflicts = label_nunique[label_nunique > 1].index
-    if len(conflicts):
+    conflict_mask = cleaned.groupby("SMILES")["LABEL"].transform("nunique").gt(1)
+    n_conflicts = int(cleaned.loc[conflict_mask, "SMILES"].nunique())
+    if n_conflicts:
         logger.warning(
-            f"Dropping {len(conflicts)} SMILES with conflicting labels after sanitization"
+            f"Dropping {n_conflicts} SMILES with conflicting labels after sanitization"
         )
-        cleaned = cleaned[~cleaned["SMILES"].isin(conflicts)]
+        cleaned = cleaned.loc[~conflict_mask]
 
     n_dupes = int(cleaned.duplicated(subset=["SMILES"]).sum())
     if n_dupes:
         logger.info(f"Dropping {n_dupes} duplicate sanitized SMILES (labels agreed)")
-    cleaned = cleaned.drop_duplicates(subset=["SMILES"], keep="first")
-    return cleaned.reset_index(drop=True)
+    return CleanedTrainingData.validate(
+        cleaned.drop_duplicates(subset=["SMILES"], keep="first").reset_index(drop=True)
+    )
