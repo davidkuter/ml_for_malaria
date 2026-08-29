@@ -27,6 +27,7 @@ result = train_chemprop_classifier(
     outdir=RUNS,
     split="scaffold",
     seed=42,
+    # charge_method: None (no extra atom charges), "gasteiger", or "nagl"
     charge_method=None,
     force=False,
 )

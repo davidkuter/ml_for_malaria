@@ -136,9 +136,11 @@ def _freeze_encoder(model) -> None:
 
 def _positive_class_proba(logits) -> np.ndarray:
     torch, *_ = _require_transformers()
+    if logits.ndim != 2 or logits.shape[-1] != 2:
+        raise RuntimeError(
+            f"Expected 2-class logits (N, 2), got shape {tuple(logits.shape)}"
+        )
     probs = torch.softmax(logits, dim=-1)
-    if probs.shape[-1] == 1:
-        return probs.detach().cpu().numpy().reshape(-1)
     return probs[:, 1].detach().cpu().numpy()
 
 
@@ -200,6 +202,10 @@ class SmilesTransformerClassifier:
         self.model.eval()
         with torch.no_grad():
             logits = self.model(**encoded).logits
+        if logits.shape[0] != len(unique):
+            raise RuntimeError(
+                f"ChemBERTa logits batch {logits.shape[0]} != unique SMILES {len(unique)}"
+            )
         mapped = pd.Series(
             _positive_class_proba(logits),
             index=list(unique),

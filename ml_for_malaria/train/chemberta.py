@@ -27,6 +27,8 @@ from ml_for_malaria.train.prepare import prepare_training_run, train_val_indices
 
 DEFAULT_MAX_EPOCHS = 8
 DEFAULT_BATCH_SIZE = 8
+DEFAULT_PATIENCE = 2
+DEFAULT_MIN_DELTA = 0.01
 
 
 @dataclass
@@ -40,13 +42,13 @@ def _require_trainer():
     try:
         import torch
         from torch.utils.data import Dataset
-        from transformers import Trainer, TrainingArguments
+        from transformers import EarlyStoppingCallback, Trainer, TrainingArguments
     except ImportError as exc:
         raise ImportError(
             "ChemBERTa training requires the optional 'dl' extra "
             "(torch, transformers, accelerate). Install with: uv sync --extra dl"
         ) from exc
-    return torch, Dataset, Trainer, TrainingArguments
+    return torch, Dataset, Trainer, TrainingArguments, EarlyStoppingCallback
 
 
 def _smiles_dataset(tokenizer, smiles: pd.Series, labels: pd.Series):
@@ -55,7 +57,7 @@ def _smiles_dataset(tokenizer, smiles: pd.Series, labels: pd.Series):
     class _EncodedSmiles(Dataset):
         def __init__(self, encodings, y):
             self.encodings = encodings
-            self.labels = np.asarray(y, dtype=np.int64)
+            self.labels = y
 
         def __len__(self):
             return len(self.labels)
@@ -65,14 +67,22 @@ def _smiles_dataset(tokenizer, smiles: pd.Series, labels: pd.Series):
             item["labels"] = int(self.labels[idx])
             return item
 
+    smiles_list = list(smiles)
     encodings = tokenizer(
-        list(smiles),
+        smiles_list,
         truncation=True,
         padding=True,
         max_length=MAX_LENGTH,
         return_tensors="pt",
     )
-    return _EncodedSmiles(encodings, labels)
+    labels_arr = np.asarray(labels, dtype=np.int64)
+    n_tokens = int(encodings["input_ids"].shape[0])
+    if len(smiles_list) != len(labels_arr) or n_tokens != len(labels_arr):
+        raise RuntimeError(
+            f"ChemBERTa dataset length mismatch: smiles={len(smiles_list)} "
+            f"labels={len(labels_arr)} tokens={n_tokens}"
+        )
+    return _EncodedSmiles(encodings, labels_arr)
 
 
 def _training_args(
@@ -82,7 +92,7 @@ def _training_args(
     seed: int,
     accelerator: str,
 ):
-    _, _, _, TrainingArguments = _require_trainer()
+    _, _, _, TrainingArguments, _ = _require_trainer()
     kwargs = {
         "output_dir": str(output_dir),
         "num_train_epochs": max_epochs,
@@ -91,7 +101,11 @@ def _training_args(
         "seed": seed,
         "report_to": [],
         "logging_strategy": "no",
-        "save_strategy": "no",
+        "save_strategy": "epoch",
+        "save_total_limit": 1,
+        "load_best_model_at_end": True,
+        "metric_for_best_model": "eval_loss",
+        "greater_is_better": False,
         "dataloader_num_workers": 0,
     }
     if accelerator == "cpu":
@@ -116,6 +130,10 @@ def _predict_proba(model, tokenizer, smiles: pd.Series) -> np.ndarray:
     model.eval()
     with torch.no_grad():
         logits = model(**encoded).logits
+    if logits.shape[0] != len(smiles):
+        raise RuntimeError(
+            f"ChemBERTa logits batch {logits.shape[0]} != SMILES {len(smiles)}"
+        )
     return _positive_class_proba(logits)
 
 
@@ -130,6 +148,7 @@ def train_smiles_transformer(
     freeze_encoder: bool = True,
     max_epochs: int = DEFAULT_MAX_EPOCHS,
     batch_size: int = DEFAULT_BATCH_SIZE,
+    patience: int = DEFAULT_PATIENCE,
     accelerator: str = "cpu",
 ) -> TransformerTrainResult:
     """Fine-tune a SMILES transformer on the shared clean/split protocol.
@@ -137,7 +156,7 @@ def train_smiles_transformer(
     ``outdir`` is the parent runs directory; artifacts go in
     ``{outdir}/{arch}_{split}/``.
     """
-    _, _, Trainer, _ = _require_trainer()
+    _, _, Trainer, _, EarlyStoppingCallback = _require_trainer()
     outdir = resolve_run_dir(outdir, ARCHITECTURE, split)
     prepared = prepare_training_run(
         df,
@@ -190,12 +209,21 @@ def train_smiles_transformer(
         "args": args,
         "train_dataset": train_ds,
         "eval_dataset": val_ds,
+        "callbacks": [
+            EarlyStoppingCallback(
+                early_stopping_patience=patience,
+                early_stopping_threshold=DEFAULT_MIN_DELTA,
+            ),
+        ],
     }
     try:
         trainer = Trainer(**trainer_kwargs, processing_class=tokenizer)
     except TypeError:
         trainer = Trainer(**trainer_kwargs, tokenizer=tokenizer)
     trainer.train()
+    model = trainer.model
+    if trainer.state.best_metric is not None:
+        logger.info(f"Restored best eval_loss={trainer.state.best_metric:.4f}")
     ckpt.hf_model_dir.mkdir(parents=True, exist_ok=True)
     model.save_pretrained(ckpt.hf_model_dir)
     tokenizer.save_pretrained(ckpt.hf_model_dir)
@@ -203,6 +231,10 @@ def train_smiles_transformer(
     test_smiles = smiles.iloc[prepared.test_idx]
     y_proba = _predict_proba(model, tokenizer, test_smiles)
     y_true = y.iloc[prepared.test_idx].to_numpy()
+    if y_proba.shape[0] != y_true.shape[0]:
+        raise RuntimeError(
+            f"ChemBERTa test scores {y_proba.shape[0]} != labels {y_true.shape[0]}"
+        )
     y_pred = (y_proba >= 0.5).astype(int)
     test_metrics = compute_test_metrics(y_true, y_pred, y_proba)
     logger.info(

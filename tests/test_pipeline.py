@@ -209,6 +209,8 @@ def test_compute_test_metrics_and_report_roundtrip(tmp_path: Path):
     assert EvalMetrics.roc_auc in markdown
     assert EvalMetrics.pr_auc in markdown
     assert 0.0 <= metrics.pr_auc <= 1.0
+    with pytest.raises(ValueError, match="same length"):
+        compute_test_metrics([0, 1], [0, 1], [0.1])
     assert "AtomPair" in markdown
     assert FingerprintComparison.fingerprint in markdown
     assert FingerprintComparison.f1_0 in markdown

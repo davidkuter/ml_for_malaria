@@ -62,6 +62,11 @@ def compute_test_metrics(
     y_true = np.asarray(y_true)
     y_pred = np.asarray(y_pred)
     y_proba = np.asarray(y_proba)
+    if y_true.shape[0] != y_pred.shape[0] or y_true.shape[0] != y_proba.shape[0]:
+        raise ValueError(
+            "y_true, y_pred, and y_proba must have the same length "
+            f"(got {y_true.shape[0]}, {y_pred.shape[0]}, {y_proba.shape[0]})"
+        )
 
     skip_rows = (
         SklearnReport.ACCURACY,

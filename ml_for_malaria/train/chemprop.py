@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -11,9 +12,12 @@ from ml_for_malaria.chemistry.charges import parse_charge_method
 from ml_for_malaria.model.chemprop_classifier import (
     ARCHITECTURE,
     ChempropClassifier,
+    binary_mol_probabilities,
     build_featurizer,
     extra_atom_fdim,
+    graph_batch_to_device,
     molecule_datapoint,
+    n_mols_in_graph_batch,
 )
 from ml_for_malaria.report import build_report, compute_test_metrics, write_report
 from ml_for_malaria.runs.paths import resolve_run_dir
@@ -25,12 +29,13 @@ from ml_for_malaria.schemas import (
 )
 from ml_for_malaria.train.prepare import prepare_training_run, train_val_indices
 
-DEFAULT_MAX_EPOCHS = 30
+DEFAULT_MAX_EPOCHS = 50
 DEFAULT_BATCH_SIZE = 32
 DEFAULT_HIDDEN_SIZE = 128
 DEFAULT_DROPOUT = 0.1
 DEFAULT_DEPTH = 3
 DEFAULT_PATIENCE = 8
+DEFAULT_MIN_DELTA = 0.01
 _PARAMS_HIDDEN = "hidden_size"
 _PARAMS_DEPTH = "depth"
 _PARAMS_DROPOUT = "dropout"
@@ -54,7 +59,7 @@ def _require_lightning_chemprop():
             BondMessagePassing,
             NormAggregation,
         )
-        from lightning.pytorch.callbacks import EarlyStopping
+        from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
     except ImportError as exc:
         raise ImportError(
             "Chemprop training requires the optional 'dl' extra "
@@ -69,6 +74,7 @@ def _require_lightning_chemprop():
         BondMessagePassing,
         NormAggregation,
         EarlyStopping,
+        ModelCheckpoint,
     )
 
 
@@ -81,6 +87,7 @@ def _build_mpnn(featurizer, hidden_size: int, dropout: float, depth: int):
         BinaryClassificationFFN,
         BondMessagePassing,
         NormAggregation,
+        _,
         _,
     ) = _require_lightning_chemprop()
     mp = BondMessagePassing(
@@ -122,15 +129,24 @@ def _predict_loader(model, loader) -> np.ndarray:
     import torch
 
     model.eval()
+    device = next(model.parameters()).device
     chunks: list[np.ndarray] = []
+    n_mols = 0
     with torch.no_grad():
         for batch in loader:
-            bmg, V_d, X_d, *_ = batch
+            bmg, V_d, X_d = graph_batch_to_device(batch, device)
             pred = model(bmg, V_d, X_d)
-            chunks.append(pred.detach().cpu().numpy().reshape(-1))
+            batch_n = n_mols_in_graph_batch(bmg)
+            chunks.append(binary_mol_probabilities(pred, batch_n))
+            n_mols += batch_n
     if not chunks:
         return np.array([], dtype=np.float64)
-    return np.clip(np.concatenate(chunks), 0.0, 1.0)
+    probs = np.concatenate(chunks)
+    if probs.shape[0] != n_mols:
+        raise RuntimeError(
+            f"Chemprop concatenated {probs.shape[0]} scores for {n_mols} molecules"
+        )
+    return probs
 
 
 def train_chemprop_classifier(
@@ -158,11 +174,12 @@ def train_chemprop_classifier(
         pl,
         MoleculeDataset,
         build_dataloader,
-        _,
+        MPNN,
         _,
         _,
         _,
         EarlyStopping,
+        ModelCheckpoint,
     ) = _require_lightning_chemprop()
     charge_method = parse_charge_method(charge_method)
     outdir = resolve_run_dir(outdir, ARCHITECTURE, split, charge_method=charge_method)
@@ -203,14 +220,25 @@ def train_chemprop_classifier(
     test_points, test_kept = _datapoints_for_indices(
         cleaned, prepared.test_idx, charge_method
     )
+    dropped_fit = len(fit_idx) - len(train_kept)
+    dropped_val = len(val_idx) - len(val_kept)
+    dropped_test = len(prepared.test_idx) - len(test_kept)
+    if dropped_fit or dropped_val or dropped_test:
+        logger.warning(
+            "Dropped molecules that failed Chemprop parse/charges: "
+            f"fit={dropped_fit}/{len(fit_idx)}, val={dropped_val}/{len(val_idx)}, "
+            f"test={dropped_test}/{len(prepared.test_idx)}"
+        )
     if not train_points or not test_points:
         raise RuntimeError(
             "Chemprop training dropped every train or test molecule "
             "(parse or charge assignment failed)."
         )
     if not val_points:
-        logger.warning("Empty Chemprop val split; reusing a train batch for validation")
-        val_points, val_kept = train_points[:1], train_kept[:1]
+        raise RuntimeError(
+            "Chemprop validation split is empty after parse/charge drops; "
+            "refusing to early-stop on a dummy train batch."
+        )
 
     featurizer = build_featurizer(charge_method)
     train_dset = MoleculeDataset(train_points, featurizer=featurizer)
@@ -241,30 +269,56 @@ def train_chemprop_classifier(
     model = _build_mpnn(
         featurizer, hidden_size=hidden_size, dropout=dropout, depth=depth
     )
-    callbacks = [
-        EarlyStopping(
-            monitor="val_loss",
-            mode="min",
-            patience=patience,
-            verbose=False,
-            strict=False,
-        )
-    ]
+    lightning_dir = ckpt.outdir / "lightning"
+    checkpoint = ModelCheckpoint(
+        dirpath=str(lightning_dir / "checkpoints"),
+        filename="best",
+        monitor="val_loss",
+        mode="min",
+        save_top_k=1,
+    )
+    early_stop = EarlyStopping(
+        monitor="val_loss",
+        mode="min",
+        patience=patience,
+        min_delta=DEFAULT_MIN_DELTA,
+        verbose=False,
+        strict=True,
+    )
     trainer = pl.Trainer(
         logger=False,
         enable_progress_bar=False,
         enable_model_summary=False,
         accelerator=accelerator,
         max_epochs=max_epochs,
-        callbacks=callbacks,
-        default_root_dir=str(ckpt.outdir / "lightning"),
+        callbacks=[checkpoint, early_stop],
+        default_root_dir=str(lightning_dir),
         num_sanity_val_steps=0,
     )
     logger.info("Training Chemprop D-MPNN")
     trainer.fit(model, train_loader, val_loader)
-    trainer.save_checkpoint(str(ckpt.lightning_ckpt_path))
+    best_path = checkpoint.best_model_path
+    if not best_path:
+        raise RuntimeError(
+            "Chemprop training logged no val_loss; cannot pick a checkpoint."
+        )
+    if early_stop.stopped_epoch:
+        logger.info(f"Early stopping at epoch {early_stop.stopped_epoch}")
+    else:
+        logger.info(
+            f"Trained all {max_epochs} epochs; restoring best val_loss checkpoint"
+        )
+    if checkpoint.best_model_score is not None:
+        logger.info(f"Best val_loss={float(checkpoint.best_model_score):.4f}")
+    shutil.copy2(best_path, ckpt.lightning_ckpt_path)
+    model = MPNN.load_from_checkpoint(str(best_path), map_location="cpu")
+    model.eval()
 
     y_proba = _predict_loader(model, test_loader)
+    if y_proba.shape[0] != len(test_kept):
+        raise RuntimeError(
+            f"Chemprop test scores {y_proba.shape[0]} != kept test mols {len(test_kept)}"
+        )
     y_true = y.iloc[test_kept].to_numpy()
     y_pred = (y_proba >= 0.5).astype(int)
     test_metrics = compute_test_metrics(y_true, y_pred, y_proba)
