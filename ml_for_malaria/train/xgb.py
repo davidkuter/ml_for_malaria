@@ -11,7 +11,15 @@ from hyperopt import STATUS_OK, Trials, fmin, hp, tpe
 from loguru import logger
 from xgboost import XGBClassifier
 
+from ml_for_malaria.chemistry.featurization import (
+    DEFAULT_FP_SIZE,
+    featurize_smiles,
+    get_fingerprint_generators,
+)
 from ml_for_malaria.model.xgb_classifier import ARCHITECTURE, XGBFingerprintClassifier
+from ml_for_malaria.report import build_report, compute_test_metrics, write_report
+from ml_for_malaria.runs.checkpoints import to_jsonable
+from ml_for_malaria.runs.paths import resolve_run_dir
 from ml_for_malaria.schemas import (
     CleanedTrainingData,
     EvalMetrics,
@@ -24,15 +32,7 @@ from ml_for_malaria.schemas import (
     TrainingReport,
     XGBParams,
 )
-from ml_for_malaria.train.checkpoints import to_jsonable
-from ml_for_malaria.train.featurization import (
-    DEFAULT_FP_SIZE,
-    featurize_smiles,
-    get_fingerprint_generators,
-)
 from ml_for_malaria.train.prepare import prepare_training_run
-from ml_for_malaria.train.report import build_report, compute_test_metrics, write_report
-from ml_for_malaria.train.run_dir import resolve_run_dir
 
 NUM_BOOST_ROUND = 1000
 EARLY_STOPPING_ROUNDS = 20
@@ -321,9 +321,7 @@ def train_xgb_classifier(
     ).T
     best_fingerprint = comparison[FingerprintScore.cv_auc].idxmax()
     best = fingerprint_comparison[best_fingerprint]
-    logger.info(
-        f"Best fingerprint by CV AUC: {best_fingerprint} ({best.cv_auc:.4f})"
-    )
+    logger.info(f"Best fingerprint by CV AUC: {best_fingerprint} ({best.cv_auc:.4f})")
     shutil.copy2(
         ckpt.fingerprint_model_path(best_fingerprint),
         ckpt.model_path,

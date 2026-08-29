@@ -15,6 +15,8 @@ from ml_for_malaria.model.smiles_transformer import (
     _positive_class_proba,
     load_tokenizer_and_model,
 )
+from ml_for_malaria.report import build_report, compute_test_metrics, write_report
+from ml_for_malaria.runs.paths import resolve_run_dir
 from ml_for_malaria.schemas import (
     CleanedTrainingData,
     ModelMeta,
@@ -22,8 +24,6 @@ from ml_for_malaria.schemas import (
     TrainingReport,
 )
 from ml_for_malaria.train.prepare import prepare_training_run, train_val_indices
-from ml_for_malaria.train.report import build_report, compute_test_metrics, write_report
-from ml_for_malaria.train.run_dir import resolve_run_dir
 
 DEFAULT_MAX_EPOCHS = 8
 DEFAULT_BATCH_SIZE = 8

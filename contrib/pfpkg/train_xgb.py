@@ -3,9 +3,9 @@ from pathlib import Path
 import pandas as pd
 from loguru import logger
 
+from ml_for_malaria.chemistry import encode_binary_labels
 from ml_for_malaria.schemas import CleanedTrainingData
 from ml_for_malaria.train import train_xgb_classifier
-from ml_for_malaria.train.featurization import encode_binary_labels
 
 ROOT = Path(__file__).resolve().parents[2]
 PFPKG = ROOT / "data" / "pfpkg"

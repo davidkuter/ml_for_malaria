@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pandas as pd
 
+from ml_for_malaria.chemistry.featurization import sanitize_smiles
 from ml_for_malaria.schemas import CleanedTrainingData, Predictions
-from ml_for_malaria.train.featurization import sanitize_smiles
 
 
 def prepare_predict_smiles(

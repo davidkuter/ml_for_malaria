@@ -35,21 +35,17 @@ def resolve_run_dir(
     charge_method: str | None = None,
 ) -> Path:
     """Resolve the run subdirectory under ``parent`` (e.g. ``runs/``)."""
-    return Path(parent) / run_dirname(
-        architecture, split, charge_method=charge_method
-    )
+    return Path(parent) / run_dirname(architecture, split, charge_method=charge_method)
 
 
 def completed_run_dirs(parent: str | Path) -> list[Path]:
     """Subdirectories of ``parent`` that contain a training ``report.json``."""
-    from ml_for_malaria.train.checkpoints import RunCheckpointer
+    from ml_for_malaria.runs.checkpoints import RunCheckpointer
 
     root = Path(parent)
     if not root.exists():
         return []
     name = RunCheckpointer.REPORT_JSON
     return sorted(
-        path
-        for path in root.iterdir()
-        if path.is_dir() and (path / name).exists()
+        path for path in root.iterdir() if path.is_dir() and (path / name).exists()
     )

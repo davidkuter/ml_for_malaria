@@ -60,9 +60,7 @@ def _nagl_charges(mol: Chem.Mol) -> np.ndarray:
         ) from exc
     try:
         offmol = Molecule.from_rdkit(mol, allow_undefined_stereo=True)
-        offmol.assign_partial_charges(
-            partial_charge_method=NAGL_PARTIAL_CHARGE_METHOD
-        )
+        offmol.assign_partial_charges(partial_charge_method=NAGL_PARTIAL_CHARGE_METHOD)
         charges = offmol.partial_charges
         if charges is None:
             raise ChargeAssignmentError("NAGL returned no partial charges")

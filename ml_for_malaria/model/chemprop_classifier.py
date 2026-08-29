@@ -7,10 +7,10 @@ import pandas as pd
 from loguru import logger
 from rdkit import Chem
 
+from ml_for_malaria.chemistry.charges import ChargeAssignmentError, atom_charges
 from ml_for_malaria.model.predict import prepare_predict_smiles
+from ml_for_malaria.runs.checkpoints import RunCheckpointer
 from ml_for_malaria.schemas import Architecture, ModelMeta, Predictions
-from ml_for_malaria.train.charges import ChargeAssignmentError, atom_charges
-from ml_for_malaria.train.checkpoints import RunCheckpointer
 
 ARCHITECTURE = Architecture.CHEMPROP
 _EXTRA_ATOM_FDIM = 1
@@ -25,7 +25,13 @@ def _require_chemprop():
         raise ImportError(
             "Chemprop requires the optional 'dl' extra (chemprop, torch)."
         ) from exc
-    return MoleculeDatapoint, MoleculeDataset, build_dataloader, SimpleMoleculeMolGraphFeaturizer, MPNN
+    return (
+        MoleculeDatapoint,
+        MoleculeDataset,
+        build_dataloader,
+        SimpleMoleculeMolGraphFeaturizer,
+        MPNN,
+    )
 
 
 def extra_atom_fdim(charge_method: str | None) -> int:
@@ -109,7 +115,9 @@ class ChempropClassifier:
         kept: list[str] = []
         points = []
         for smi in unique:
-            point = molecule_datapoint(smi, y=None, charge_method=self.metadata.charge_method)
+            point = molecule_datapoint(
+                smi, y=None, charge_method=self.metadata.charge_method
+            )
             if point is None:
                 continue
             points.append(point)

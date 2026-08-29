@@ -2,12 +2,12 @@ import numpy as np
 import pytest
 from rdkit import Chem
 
-from ml_for_malaria.schemas import ChargeMethod
-from ml_for_malaria.train.charges import (
+from ml_for_malaria.chemistry import (
     ChargeAssignmentError,
     atom_charges,
     parse_charge_method,
 )
+from ml_for_malaria.schemas import ChargeMethod
 
 
 def test_parse_charge_method_accepts_none_and_known():

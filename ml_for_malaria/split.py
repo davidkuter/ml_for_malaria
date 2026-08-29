@@ -88,12 +88,8 @@ class ScaffoldSplitter:
             raise ValueError("smiles and labels must have the same length")
         positions = pd.RangeIndex(len(smiles))
         groups = murcko_group_keys(smiles)
-        splitter = GroupShuffleSplit(
-            n_splits=1, test_size=test_size, random_state=seed
-        )
-        train_idx, test_idx = next(
-            splitter.split(positions, labels, groups=groups)
-        )
+        splitter = GroupShuffleSplit(n_splits=1, test_size=test_size, random_state=seed)
+        train_idx, test_idx = next(splitter.split(positions, labels, groups=groups))
         if len(train_idx) == 0 or len(test_idx) == 0:
             raise ValueError(
                 "Scaffold split produced an empty train or test set. "

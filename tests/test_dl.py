@@ -3,8 +3,8 @@ from pathlib import Path
 import pytest
 
 from ml_for_malaria.model.smiles_transformer import TINY_TEST_NAME
+from ml_for_malaria.runs import resolve_run_dir
 from ml_for_malaria.schemas import Architecture, ChargeMethod, Predictions
-from ml_for_malaria.train.run_dir import resolve_run_dir
 from tests.toy_data import toy_binary_df
 
 
@@ -12,7 +12,7 @@ def test_chemprop_smoke_with_gasteiger(tmp_path: Path):
     pytest.importorskip("chemprop")
     pytest.importorskip("lightning")
     from ml_for_malaria.model import load_classifier
-    from ml_for_malaria.train.train_chemprop import train_chemprop_classifier
+    from ml_for_malaria.train.chemprop import train_chemprop_classifier
 
     result = train_chemprop_classifier(
         toy_binary_df(),
@@ -49,7 +49,7 @@ def test_chemprop_smoke_with_gasteiger(tmp_path: Path):
 def test_chemprop_smoke_without_charges(tmp_path: Path):
     pytest.importorskip("chemprop")
     pytest.importorskip("lightning")
-    from ml_for_malaria.train.train_chemprop import train_chemprop_classifier
+    from ml_for_malaria.train.chemprop import train_chemprop_classifier
 
     result = train_chemprop_classifier(
         toy_binary_df(),
@@ -77,7 +77,7 @@ def test_chemberta_tiny_test_does_not_download(tmp_path: Path):
     pytest.importorskip("transformers")
     pytest.importorskip("torch")
     from ml_for_malaria.model import load_classifier
-    from ml_for_malaria.train.train_chemberta import train_smiles_transformer
+    from ml_for_malaria.train.chemberta import train_smiles_transformer
 
     result = train_smiles_transformer(
         toy_binary_df(),

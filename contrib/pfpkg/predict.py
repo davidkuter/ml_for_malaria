@@ -3,8 +3,8 @@ from pathlib import Path
 import pandas as pd
 
 from ml_for_malaria.model import XGBFingerprintClassifier
+from ml_for_malaria.runs import resolve_run_dir
 from ml_for_malaria.schemas import Architecture, Predictions
-from ml_for_malaria.train.run_dir import resolve_run_dir
 
 ROOT = Path(__file__).resolve().parents[2]
 PFPKG = ROOT / "data" / "pfpkg"

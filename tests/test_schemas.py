@@ -2,13 +2,13 @@ import pandas as pd
 import pytest
 from pandera.errors import SchemaError
 
+from ml_for_malaria.chemistry import clean_training_data
 from ml_for_malaria.schemas import (
     CleanedTrainingData,
     FingerprintFeatures,
     ModelMeta,
     Predictions,
 )
-from ml_for_malaria.train.featurization import clean_training_data
 
 
 def test_schema_class_attributes_are_field_names():

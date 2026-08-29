@@ -1,7 +1,7 @@
 from pathlib import Path
 
+from ml_for_malaria.runs.checkpoints import RunCheckpointer
 from ml_for_malaria.schemas import Architecture, ModelMeta
-from ml_for_malaria.train.checkpoints import RunCheckpointer
 
 
 def load_classifier(outdir: str | Path, fingerprint: str | None = None):
@@ -22,6 +22,4 @@ def load_classifier(outdir: str | Path, fingerprint: str | None = None):
         from ml_for_malaria.model.smiles_transformer import SmilesTransformerClassifier
 
         return SmilesTransformerClassifier.load(outdir)
-    raise ValueError(
-        f"Unknown architecture {metadata.architecture!r} in {ckpt.outdir}"
-    )
+    raise ValueError(f"Unknown architecture {metadata.architecture!r} in {ckpt.outdir}")

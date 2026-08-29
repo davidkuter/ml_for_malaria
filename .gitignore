@@ -54,8 +54,8 @@ cover/
 # Data
 data/
 
-# Training runs
-runs/
+# Training run artifacts at repo root (not ml_for_malaria/runs)
+/runs/
 
 # Virtual environments
 # No trailing slash: on WSL this path is a symlink, and `.venv/` only matches directories.

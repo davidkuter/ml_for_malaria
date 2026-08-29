@@ -4,12 +4,12 @@ from loguru import logger
 from rdkit import Chem
 from rdkit.Chem.Draw import SimilarityMaps
 
-from ml_for_malaria.schemas import AtomShapWeights, ShapValues
-from ml_for_malaria.train.featurization import (
+from ml_for_malaria.chemistry.featurization import (
     featurize_smiles,
     get_bit_atom_map,
     sanitize_smiles,
 )
+from ml_for_malaria.schemas import AtomShapWeights, ShapValues
 
 
 def shap_feature_importance(

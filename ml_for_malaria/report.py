@@ -13,6 +13,7 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 
+from ml_for_malaria.runs.checkpoints import RunCheckpointer
 from ml_for_malaria.schemas import (
     Architecture,
     ClassLabel,
@@ -28,7 +29,6 @@ from ml_for_malaria.schemas import (
     SettingsTable,
     TrainingReport,
 )
-from ml_for_malaria.train.checkpoints import RunCheckpointer
 
 
 class SklearnReport(StrEnum):
@@ -222,7 +222,9 @@ def _fingerprint_frame(comparison: dict[str, FingerprintScore]) -> pd.DataFrame:
                 score.test_metrics.roc_auc if score.test_metrics is not None else np.nan
             ),
             FingerprintComparison.accuracy: (
-                score.test_metrics.accuracy if score.test_metrics is not None else np.nan
+                score.test_metrics.accuracy
+                if score.test_metrics is not None
+                else np.nan
             ),
             FingerprintComparison.f1_0: (
                 class_f1(score.test_metrics, ClassLabel.INACTIVE)
@@ -246,9 +248,9 @@ def _fingerprint_frame(comparison: dict[str, FingerprintScore]) -> pd.DataFrame:
     frame[FingerprintComparison.n_estimators] = frame[
         FingerprintComparison.n_estimators
     ].astype("Int64")
-    return frame.sort_values(
-        FingerprintComparison.cv_auc, ascending=False
-    ).reset_index(drop=True)
+    return frame.sort_values(FingerprintComparison.cv_auc, ascending=False).reset_index(
+        drop=True
+    )
 
 
 def _fingerprint_detail_sections(comparison: dict[str, FingerprintScore]) -> list[str]:

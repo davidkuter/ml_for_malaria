@@ -6,13 +6,13 @@ import numpy as np
 import pandas as pd
 
 from ml_for_malaria.model.predict import prepare_predict_smiles
+from ml_for_malaria.runs.checkpoints import RunCheckpointer
 from ml_for_malaria.schemas import (
     Architecture,
     ModelMeta,
     Predictions,
     PretrainedCheckpoint,
 )
-from ml_for_malaria.train.checkpoints import RunCheckpointer
 
 ARCHITECTURE = Architecture.CHEMBERTA
 DEFAULT_PRETRAINED_NAME = PretrainedCheckpoint.CHEMBERTA_77M_MTR
@@ -37,8 +37,7 @@ def _require_transformers():
         )
     except ImportError as exc:
         raise ImportError(
-            "SMILES transformers require the optional 'dl' extra "
-            "(torch, transformers)."
+            "SMILES transformers require the optional 'dl' extra (torch, transformers)."
         ) from exc
     return (
         torch,
@@ -154,7 +153,9 @@ class SmilesTransformerClassifier:
 
     @classmethod
     def load(cls, outdir: str | Path) -> SmilesTransformerClassifier:
-        _, AutoModelForSequenceClassification, AutoTokenizer, *_ = _require_transformers()
+        _, AutoModelForSequenceClassification, AutoTokenizer, *_ = (
+            _require_transformers()
+        )
         ckpt = RunCheckpointer(outdir)
         config_path = ckpt.hf_model_dir / "config.json"
         if not ckpt.meta_path.exists() or not config_path.exists():

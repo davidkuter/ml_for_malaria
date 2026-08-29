@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 from loguru import logger
 
+from ml_for_malaria.chemistry.charges import parse_charge_method
 from ml_for_malaria.model.chemprop_classifier import (
     ARCHITECTURE,
     ChempropClassifier,
@@ -14,16 +15,15 @@ from ml_for_malaria.model.chemprop_classifier import (
     extra_atom_fdim,
     molecule_datapoint,
 )
+from ml_for_malaria.report import build_report, compute_test_metrics, write_report
+from ml_for_malaria.runs.paths import resolve_run_dir
 from ml_for_malaria.schemas import (
     CleanedTrainingData,
     ModelMeta,
     RunConfig,
     TrainingReport,
 )
-from ml_for_malaria.train.charges import parse_charge_method
 from ml_for_malaria.train.prepare import prepare_training_run, train_val_indices
-from ml_for_malaria.train.report import build_report, compute_test_metrics, write_report
-from ml_for_malaria.train.run_dir import resolve_run_dir
 
 DEFAULT_MAX_EPOCHS = 30
 DEFAULT_BATCH_SIZE = 32
@@ -165,9 +165,7 @@ def train_chemprop_classifier(
         EarlyStopping,
     ) = _require_lightning_chemprop()
     charge_method = parse_charge_method(charge_method)
-    outdir = resolve_run_dir(
-        outdir, ARCHITECTURE, split, charge_method=charge_method
-    )
+    outdir = resolve_run_dir(outdir, ARCHITECTURE, split, charge_method=charge_method)
     prepared = prepare_training_run(
         df,
         outdir,
@@ -240,7 +238,9 @@ def train_chemprop_classifier(
         drop_last=False,
     )
 
-    model = _build_mpnn(featurizer, hidden_size=hidden_size, dropout=dropout, depth=depth)
+    model = _build_mpnn(
+        featurizer, hidden_size=hidden_size, dropout=dropout, depth=depth
+    )
     callbacks = [
         EarlyStopping(
             monitor="val_loss",
@@ -297,7 +297,7 @@ def train_chemprop_classifier(
     write_report(report, ckpt.report_json_path, ckpt.report_md_path)
     ckpt.save_config(expected)
 
-    classifier = ChempropClassifier(model=model, featurizer=featurizer, metadata=metadata)
-    return ChempropTrainResult(
-        classifier=classifier, report=report, outdir=ckpt.outdir
+    classifier = ChempropClassifier(
+        model=model, featurizer=featurizer, metadata=metadata
     )
+    return ChempropTrainResult(classifier=classifier, report=report, outdir=ckpt.outdir)

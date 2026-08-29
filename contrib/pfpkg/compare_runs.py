@@ -2,7 +2,8 @@ from pathlib import Path
 
 from loguru import logger
 
-from ml_for_malaria.train import completed_run_dirs, write_comparison_report
+from ml_for_malaria.report import write_comparison_report
+from ml_for_malaria.runs import completed_run_dirs
 
 ROOT = Path(__file__).resolve().parents[2]
 PFPKG = ROOT / "data" / "pfpkg"

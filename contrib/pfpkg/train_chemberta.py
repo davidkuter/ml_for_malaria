@@ -3,10 +3,10 @@ from pathlib import Path
 import pandas as pd
 from loguru import logger
 
+from ml_for_malaria.chemistry import encode_binary_labels
 from ml_for_malaria.model.smiles_transformer import DEFAULT_PRETRAINED_NAME
 from ml_for_malaria.schemas import CleanedTrainingData
-from ml_for_malaria.train.featurization import encode_binary_labels
-from ml_for_malaria.train.train_chemberta import train_smiles_transformer
+from ml_for_malaria.train.chemberta import train_smiles_transformer
 
 ROOT = Path(__file__).resolve().parents[2]
 PFPKG = ROOT / "data" / "pfpkg"

@@ -3,6 +3,26 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from ml_for_malaria.chemistry import (
+    encode_binary_labels,
+    featurize_smiles,
+    get_fingerprint_generator,
+    sanitize_smiles,
+)
+from ml_for_malaria.report import (
+    build_report,
+    compute_test_metrics,
+    report_to_markdown,
+    write_comparison_report,
+    write_report,
+)
+from ml_for_malaria.runs import (
+    RunCheckpointer,
+    completed_run_dirs,
+    data_hash,
+    resolve_run_dir,
+    run_dirname,
+)
 from ml_for_malaria.schemas import (
     Architecture,
     ChargeMethod,
@@ -14,26 +34,7 @@ from ml_for_malaria.schemas import (
     Predictions,
     RunConfig,
 )
-from ml_for_malaria.train.checkpoints import RunCheckpointer, data_hash
-from ml_for_malaria.train.featurization import (
-    encode_binary_labels,
-    featurize_smiles,
-    get_fingerprint_generator,
-    sanitize_smiles,
-)
-from ml_for_malaria.train.report import (
-    build_report,
-    compute_test_metrics,
-    report_to_markdown,
-    write_comparison_report,
-    write_report,
-)
-from ml_for_malaria.train.run_dir import (
-    completed_run_dirs,
-    resolve_run_dir,
-    run_dirname,
-)
-from ml_for_malaria.train.split import ScaffoldSplitter, get_splitter, murcko_group_keys
+from ml_for_malaria.split import ScaffoldSplitter, get_splitter, murcko_group_keys
 from tests.toy_data import toy_binary_df
 
 
@@ -48,7 +49,9 @@ def test_run_dirname_encodes_architecture_split_and_charge():
     )
     assert run_dirname(Architecture.CHEMBERTA, "scaffold") == "chemberta_scaffold"
     parent = Path("runs")
-    assert resolve_run_dir(parent, Architecture.XGBOOST, "random") == parent / "xgb_random"
+    assert (
+        resolve_run_dir(parent, Architecture.XGBOOST, "random") == parent / "xgb_random"
+    )
 
 
 def test_completed_run_dirs_lists_report_json(tmp_path: Path):

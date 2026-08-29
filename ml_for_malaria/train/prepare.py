@@ -8,10 +8,10 @@ import pandas as pd
 from loguru import logger
 from sklearn.model_selection import train_test_split
 
+from ml_for_malaria.chemistry.featurization import clean_training_data
+from ml_for_malaria.runs.checkpoints import RunCheckpointer, data_hash
 from ml_for_malaria.schemas import CleanedTrainingData, RunConfig, SplitIndices
-from ml_for_malaria.train.checkpoints import RunCheckpointer, data_hash
-from ml_for_malaria.train.featurization import clean_training_data
-from ml_for_malaria.train.split import get_splitter
+from ml_for_malaria.split import get_splitter
 
 HASH_COLUMNS = [CleanedTrainingData.SMILES, CleanedTrainingData.LABEL]
 

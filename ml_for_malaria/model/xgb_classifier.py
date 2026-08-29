@@ -7,14 +7,14 @@ import pandas as pd
 from loguru import logger
 from xgboost import XGBClassifier
 
-from ml_for_malaria.interpretation.shap import shap_feature_importance
-from ml_for_malaria.schemas import CleanedTrainingData, ModelMeta, Predictions
-from ml_for_malaria.train.checkpoints import RunCheckpointer
-from ml_for_malaria.train.featurization import (
+from ml_for_malaria.chemistry.featurization import (
     featurize_smiles,
     get_fingerprint_generator,
     sanitize_smiles,
 )
+from ml_for_malaria.interpretation.shap import shap_feature_importance
+from ml_for_malaria.runs.checkpoints import RunCheckpointer
+from ml_for_malaria.schemas import CleanedTrainingData, ModelMeta, Predictions
 
 ARCHITECTURE = "xgboost"
 
