@@ -10,7 +10,7 @@ from ml_for_malaria.train.featurization import encode_binary_labels
 ROOT = Path(__file__).resolve().parents[2]
 PFPKG = ROOT / "data" / "pfpkg"
 DATASET_PATH = PFPKG / "input" / "100nM_Training_Set.csv"
-OUTDIR = PFPKG / "runs"
+OUTDIR = PFPKG / "runs" / "random"
 
 logger.info(f"Loading data from: {DATASET_PATH}")
 df_input = pd.read_csv(DATASET_PATH)

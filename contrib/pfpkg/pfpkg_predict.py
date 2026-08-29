@@ -8,7 +8,7 @@ from ml_for_malaria.schemas import Predictions
 ROOT = Path(__file__).resolve().parents[2]
 PFPKG = ROOT / "data" / "pfpkg"
 DATA_PATH = PFPKG / "input" / "100nM_Experimental_Azoles.csv"
-OUTDIR = PFPKG / "runs"
+OUTDIR = PFPKG / "runs" / "random"
 RESULTS_PATH = OUTDIR / "pfpkg_results.csv"
 
 df = pd.read_csv(DATA_PATH)

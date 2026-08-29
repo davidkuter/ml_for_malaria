@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ml-for-malaria"
-version = "0.1.0"
+version = "0.2.0"
 description = "ML applied for Malaria"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 license = { text = "MIT" }
 keywords = ["machine learning", "malaria", "haemozoin"]
 
@@ -40,6 +40,10 @@ dev = [
     "pytest",
     "ruff",
 ]
+
+[tool.ruff]
+target-version = "py311"
+extend-exclude = ["pyproject.toml"]
 
 [tool.setuptools.packages.find]
 include = ["ml_for_malaria*"]
