@@ -186,9 +186,7 @@ class ShapValues(pa.DataFrameModel):
 
     @pa.dataframe_check
     def single_numeric_column(cls, df: pd.DataFrame) -> bool:
-        return df.shape[1] == 1 and bool(
-            pd.api.types.is_numeric_dtype(df.iloc[:, 0])
-        )
+        return df.shape[1] == 1 and bool(pd.api.types.is_numeric_dtype(df.iloc[:, 0]))
 
 
 class FingerprintComparison(pa.DataFrameModel):

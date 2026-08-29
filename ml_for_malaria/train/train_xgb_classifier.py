@@ -198,9 +198,7 @@ def train_xgb_classifier(
             outdir=ckpt.outdir,
         )
 
-    if ckpt.should_reuse(
-        ckpt.cleaned_path, stored, {RunConfig.input_hash: input_hash}
-    ):
+    if ckpt.should_reuse(ckpt.cleaned_path, stored, {RunConfig.input_hash: input_hash}):
         cleaned = ckpt.load_cleaned()
     else:
         logger.info("Cleaning training data")
@@ -208,9 +206,7 @@ def train_xgb_classifier(
         ckpt.save_cleaned(cleaned)
 
     cleaned_hash = data_hash(cleaned, _HASH_COLUMNS)
-    expected = expected.model_copy(
-        update={RunConfig.cleaned_hash: cleaned_hash}
-    )
+    expected = expected.model_copy(update={RunConfig.cleaned_hash: cleaned_hash})
 
     split_file = ckpt.split_path(split, seed)
     if ckpt.should_reuse(
@@ -235,9 +231,7 @@ def train_xgb_classifier(
             test_size=test_size,
             seed=seed,
         )
-        ckpt.save_json(
-            split_file, SplitIndices(train_idx=train_idx, test_idx=test_idx)
-        )
+        ckpt.save_json(split_file, SplitIndices(train_idx=train_idx, test_idx=test_idx))
 
     generators = {name: available[name] for name in selected}
     y = cleaned[CleanedTrainingData.LABEL]
@@ -308,9 +302,7 @@ def train_xgb_classifier(
     )
     best_fingerprint = comparison[FingerprintScore.cv_auc].idxmax()
     best = fingerprint_comparison[best_fingerprint]
-    logger.info(
-        f"Best fingerprint: {best_fingerprint}. CV AUC: {best.cv_auc:.4f}"
-    )
+    logger.info(f"Best fingerprint: {best_fingerprint}. CV AUC: {best.cv_auc:.4f}")
 
     features = ckpt.load_features(best_fingerprint)
     params = XGBParams.model_validate(best.params).model_copy(

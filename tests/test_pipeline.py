@@ -19,7 +19,11 @@ from ml_for_malaria.train.featurization import (
     get_fingerprint_generator,
     sanitize_smiles,
 )
-from ml_for_malaria.train.report import build_report, compute_test_metrics, report_to_markdown
+from ml_for_malaria.train.report import (
+    build_report,
+    compute_test_metrics,
+    report_to_markdown,
+)
 from ml_for_malaria.train.split import ScaffoldSplitter, get_splitter
 
 
@@ -151,8 +155,12 @@ def test_checkpointer_reuses_matching_config(tmp_path: Path):
     path = tmp_path / "item.json"
     ckpt.save_json(path, {"ok": True})
     stored = {RunConfig.seed: 42, RunConfig.split: "random"}
-    assert ckpt.should_reuse(path, stored, {RunConfig.seed: 42, RunConfig.split: "random"})
-    assert not ckpt.should_reuse(path, stored, {RunConfig.seed: 1, RunConfig.split: "random"})
+    assert ckpt.should_reuse(
+        path, stored, {RunConfig.seed: 42, RunConfig.split: "random"}
+    )
+    assert not ckpt.should_reuse(
+        path, stored, {RunConfig.seed: 1, RunConfig.split: "random"}
+    )
     forced = RunCheckpointer(tmp_path, force=True)
     assert not forced.should_reuse(
         path, stored, {RunConfig.seed: 42, RunConfig.split: "random"}

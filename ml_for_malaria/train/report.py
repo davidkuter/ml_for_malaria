@@ -22,6 +22,7 @@ from ml_for_malaria.schemas import (
     TrainingReport,
 )
 
+
 class SklearnReport(StrEnum):
     """Keys from ``sklearn.metrics.classification_report(..., output_dict=True)``."""
 

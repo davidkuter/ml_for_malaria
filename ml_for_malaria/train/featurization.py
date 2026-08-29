@@ -4,6 +4,7 @@ import pandas as pd
 from loguru import logger
 from rdkit import Chem
 from rdkit.Chem import AllChem, DataStructs
+from rdkit.Chem.rdchem import MolSanitizeException
 from rdkit.Chem.rdFingerprintGenerator import (
     GetAtomPairGenerator,
     GetMorganFeatureAtomInvGen,
@@ -14,6 +15,7 @@ from rdkit.Chem.rdFingerprintGenerator import (
 from ml_for_malaria.schemas import CleanedTrainingData, FingerprintFeatures
 
 DEFAULT_FP_SIZE = 2048
+_MOL_PARSE_ERRORS = (TypeError, ValueError, RuntimeError, MolSanitizeException)
 
 
 def sanitize_smiles(smiles: str, as_mol: bool = False) -> str | Chem.Mol | None:
@@ -34,7 +36,7 @@ def sanitize_smiles(smiles: str, as_mol: bool = False) -> str | Chem.Mol | None:
         if as_mol:
             return mol
         return Chem.MolToSmiles(mol)
-    except Exception:
+    except _MOL_PARSE_ERRORS:
         logger.warning(f'"{smiles}" failed sanitization')
         return None
 
@@ -59,7 +61,7 @@ def featurize_smiles(
         else:
             try:
                 mol = Chem.MolFromSmiles(smi) if smi else None
-            except Exception:
+            except _MOL_PARSE_ERRORS:
                 mol = None
         if mol is None:
             logger.warning(f'"{smi}" failed featurization')
