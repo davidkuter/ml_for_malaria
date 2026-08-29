@@ -1,7 +1,8 @@
 from typing import Protocol
 
+import datamol as dm
 import pandas as pd
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import GroupShuffleSplit, train_test_split
 
 
 class Splitter(Protocol):
@@ -43,14 +44,29 @@ class RandomSplitter:
         return train_idx.tolist(), test_idx.tolist()
 
 
-class ScaffoldSplitter:
-    """Split by Bemis–Murcko scaffold groups, then assign groups to train/test.
+def murcko_group_keys(smiles: pd.Series) -> pd.Series:
+    """Bemis–Murcko scaffold keys; empty scaffolds are unique per row."""
+    smiles = smiles.reset_index(drop=True)
+    mols = smiles.map(dm.to_mol)
+    scaffolds = mols.map(
+        lambda mol: dm.to_scaffold_murcko(mol) if mol is not None else None
+    )
+    keys = scaffolds.map(
+        lambda scf: dm.to_smiles(scf)
+        if scf is not None and scf.GetNumAtoms() > 0
+        else None
+    )
+    empty = keys.isna() | (keys.astype(str).str.len() == 0)
+    singletons = "no_scaffold:" + smiles.index.astype(str)
+    return keys.where(~empty, singletons)
 
-    Intended contract (not yet implemented):
-    1. Compute a scaffold key for each SMILES (e.g. Bemis–Murcko).
-    2. Assign whole scaffold groups to train or test so no scaffold appears in both.
-    3. Honour ``test_size`` approximately at the compound (or group) level.
-    4. Prefer preserving class balance when assigning groups.
+
+class ScaffoldSplitter:
+    """Split by Bemis–Murcko scaffold groups using sklearn GroupShuffleSplit.
+
+    Whole scaffold groups stay on one side of the split (seeded, approximate
+    ``test_size``). Labels are not stratified: sklearn cannot keep groups
+    intact and match class balance at the same time.
     """
 
     name = "scaffold"
@@ -62,11 +78,25 @@ class ScaffoldSplitter:
         test_size: float,
         seed: int,
     ) -> tuple[list[int], list[int]]:
-        raise NotImplementedError(
-            "Scaffold splitting is not implemented yet. Use split='random', "
-            "or implement ScaffoldSplitter.split to group by Bemis–Murcko "
-            "scaffold and assign groups to train/test."
+        smiles = smiles.reset_index(drop=True)
+        labels = labels.reset_index(drop=True)
+        if len(smiles) != len(labels):
+            raise ValueError("smiles and labels must have the same length")
+        positions = pd.RangeIndex(len(smiles))
+        groups = murcko_group_keys(smiles)
+        splitter = GroupShuffleSplit(
+            n_splits=1, test_size=test_size, random_state=seed
         )
+        train_idx, test_idx = next(
+            splitter.split(positions, labels, groups=groups)
+        )
+        if len(train_idx) == 0 or len(test_idx) == 0:
+            raise ValueError(
+                "Scaffold split produced an empty train or test set. "
+                "A single large Bemis–Murcko group may exceed test_size; "
+                "use split='random' or a different test_size."
+            )
+        return train_idx.tolist(), test_idx.tolist()
 
 
 _SPLITTERS: dict[str, type] = {
