@@ -7,7 +7,12 @@ from loguru import logger
 
 from ml_for_malaria.runs.checkpoints import RunCheckpointer
 from ml_for_malaria.schemas import Architecture
-from ml_for_malaria.train import train_rf_classifier, train_xgb_classifier
+from ml_for_malaria.train import (
+    train_knn_classifier,
+    train_logistic_classifier,
+    train_rf_classifier,
+    train_xgb_classifier,
+)
 
 
 def fit_one_run(
@@ -64,6 +69,28 @@ def fit_one_run(
             )
         elif architecture == Architecture.XGBOOST:
             result = train_xgb_classifier(
+                df=df,
+                outdir=outdir,
+                split=split,
+                seed=seed,
+                force=force,
+                fingerprints=fingerprints,
+                max_evals=max_evals,
+                yscramble=yscramble,
+            )
+        elif architecture == Architecture.KNN:
+            result = train_knn_classifier(
+                df=df,
+                outdir=outdir,
+                split=split,
+                seed=seed,
+                force=force,
+                fingerprints=fingerprints,
+                max_evals=max_evals,
+                yscramble=yscramble,
+            )
+        elif architecture == Architecture.LOGISTIC:
+            result = train_logistic_classifier(
                 df=df,
                 outdir=outdir,
                 split=split,

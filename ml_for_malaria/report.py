@@ -16,6 +16,7 @@ from sklearn.metrics import (
 
 from ml_for_malaria.runs.checkpoints import RunCheckpointer
 from ml_for_malaria.schemas import (
+    FINGERPRINT_ARCHITECTURES,
     Architecture,
     ClassLabel,
     ComparisonAggregate,
@@ -372,7 +373,7 @@ def write_report(report: TrainingReport, json_path: Path, md_path: Path) -> None
 def _run_identifier(
     report: TrainingReport, meta: ModelMeta | None, charge_method: str | None
 ) -> str:
-    if report.architecture in (Architecture.XGBOOST, Architecture.RANDOM_FOREST):
+    if report.architecture in FINGERPRINT_ARCHITECTURES:
         return report.best_fingerprint or _NONE_IDENTIFIER
     if report.architecture == Architecture.CHEMBERTA:
         name = report.pretrained_name

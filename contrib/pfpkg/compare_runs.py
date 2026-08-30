@@ -33,7 +33,8 @@ N_REP = 10
 SEED_START = 42
 FORCE = False
 XGB_MAX_EVALS = 0
-# None = min(n_rep, CPU count) for RF/XGB. Chemprop/ChemBERTa stay sequential (GPU).
+# None = min(n_rep, CPU count) for fingerprint sklearn (RF/XGB/k-NN/logistic).
+# Chemprop/ChemBERTa stay sequential (GPU).
 N_WORKERS: int | None = None
 
 
@@ -55,6 +56,9 @@ PFPKG_JOBS = (
     PfpkgJob(Architecture.RANDOM_FOREST, "random"),
     PfpkgJob(Architecture.RANDOM_FOREST, "scaffold"),
     PfpkgJob(Architecture.XGBOOST, "scaffold"),
+    PfpkgJob(Architecture.KNN, "random"),
+    PfpkgJob(Architecture.KNN, "scaffold"),
+    PfpkgJob(Architecture.LOGISTIC, "scaffold"),
 )
 HPO_ARCHITECTURES = (Architecture.RANDOM_FOREST, Architecture.XGBOOST)
 HPO_MAX_EVALS = 50
@@ -131,8 +135,9 @@ def run_pfpkg_suite(
 ) -> list[Path]:
     """Fit each pfpkg comparison job for ``n_rep`` seeds; completed runs are reused.
 
-    RF and XGBoost seeds (including HPO) run in a process pool. Chemprop and
-    ChemBERTa stay sequential so they do not share one GPU.
+    Fingerprint sklearn seeds (RF, XGBoost, k-NN, logistic, including HPO)
+    run in a process pool. Chemprop and ChemBERTa stay sequential so they
+    do not share one GPU.
     """
     seeds = replicate_seeds(n_rep, start=seed_start)
     outdirs: list[Path] = []

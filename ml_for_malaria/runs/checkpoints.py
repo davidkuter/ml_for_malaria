@@ -11,6 +11,7 @@ from loguru import logger
 from pydantic import BaseModel
 
 from ml_for_malaria.schemas import (
+    SKLEARN_JOBLIB_ARCHITECTURES,
     Architecture,
     CleanedTrainingData,
     FingerprintFeatures,
@@ -165,7 +166,7 @@ class RunCheckpointer:
             return self.lightning_ckpt_path
         if architecture == Architecture.CHEMBERTA:
             return self.hf_model_dir / "config.json"
-        if architecture == Architecture.RANDOM_FOREST:
+        if architecture in SKLEARN_JOBLIB_ARCHITECTURES:
             return self.sklearn_model_path
         return self.model_path
 
@@ -175,7 +176,7 @@ class RunCheckpointer:
         first = expected.fingerprints[0]
         if expected.architecture == Architecture.XGBOOST:
             return self.fingerprint_model_path(first).exists()
-        if expected.architecture == Architecture.RANDOM_FOREST:
+        if expected.architecture in SKLEARN_JOBLIB_ARCHITECTURES:
             return self.fingerprint_sklearn_path(first).exists()
         return True
 

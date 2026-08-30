@@ -59,6 +59,8 @@ def test_run_dirname_encodes_architecture_split_and_charge():
     )
     assert run_dirname(Architecture.CHEMBERTA, "scaffold") == "chemberta_scaffold"
     assert run_dirname(Architecture.RANDOM_FOREST, "scaffold") == "rf_scaffold"
+    assert run_dirname(Architecture.KNN, "scaffold") == "knn_scaffold"
+    assert run_dirname(Architecture.LOGISTIC, "scaffold") == "logistic_scaffold"
     assert (
         run_dirname(Architecture.XGBOOST, "scaffold", hpo=True) == "xgb_scaffold_hpo"
     )
@@ -663,6 +665,171 @@ def test_train_rf_classifier_yscramble_writes_yscramble_run_dir(tmp_path: Path):
     run = resolve_run_dir(
         tmp_path, Architecture.RANDOM_FOREST, "random", seed=0, yscramble=True
     )
+    assert result.outdir == run
+    assert result.report.yscramble is True
+    cleaned = pd.read_parquet(run / "cleaned.parquet")
+    expected = clean_training_data(df)
+    assert (
+        cleaned[CleanedTrainingData.LABEL].tolist()
+        == expected[CleanedTrainingData.LABEL].tolist()
+    )
+    markdown = (run / "report.md").read_text(encoding="utf-8")
+    assert "y-scrambled" in markdown
+
+
+@pytest.mark.parametrize(
+    ("train_fn_name", "architecture"),
+    [
+        ("train_knn_classifier", Architecture.KNN),
+        ("train_logistic_classifier", Architecture.LOGISTIC),
+    ],
+)
+def test_train_sklearn_baseline_smoke_and_checkpoint_reuse(
+    tmp_path: Path, train_fn_name: str, architecture: Architecture
+):
+    from ml_for_malaria.chemistry.featurization import DEFAULT_FINGERPRINT
+    from ml_for_malaria.model import load_classifier
+    from ml_for_malaria.train import train_knn_classifier, train_logistic_classifier
+
+    train_fn = {
+        "train_knn_classifier": train_knn_classifier,
+        "train_logistic_classifier": train_logistic_classifier,
+    }[train_fn_name]
+    df = toy_binary_df()
+    result = train_fn(
+        df,
+        outdir=tmp_path,
+        split="random",
+        seed=0,
+        test_size=0.25,
+        fingerprints=["AtomPair", DEFAULT_FINGERPRINT],
+        fp_size=128,
+    )
+    run = resolve_run_dir(tmp_path, architecture, "random", seed=0)
+    assert result.outdir == run
+    assert result.report.best_fingerprint == DEFAULT_FINGERPRINT
+    assert result.report.architecture == architecture
+    assert set(result.report.fingerprint_comparison) == {
+        "AtomPair",
+        DEFAULT_FINGERPRINT,
+    }
+    assert result.report.fingerprint_comparison["AtomPair"].cv_auc is None
+    assert (run / "report.json").exists()
+    assert (run / "model.joblib").exists()
+    assert (run / "models" / DEFAULT_FINGERPRINT / "model.joblib").exists()
+    preds = result.classifier.predict(["CCO", "c1ccncc1"])
+    assert Predictions.PROBABILITY in preds.columns
+    assert len(preds) == 2
+    loaded = load_classifier(run)
+    assert loaded.metadata.fingerprint == DEFAULT_FINGERPRINT
+    per_fp = load_classifier(run, fingerprint="AtomPair")
+    assert per_fp.metadata.fingerprint == "AtomPair"
+
+    reused = train_fn(
+        df,
+        outdir=tmp_path,
+        split="random",
+        seed=0,
+        test_size=0.25,
+        fingerprints=["AtomPair", DEFAULT_FINGERPRINT],
+        fp_size=128,
+    )
+    assert reused.outdir == run
+    assert reused.report.test_metrics.roc_auc == result.report.test_metrics.roc_auc
+
+
+def test_train_knn_uses_jaccard_distance(tmp_path: Path):
+    from ml_for_malaria.chemistry.featurization import DEFAULT_FINGERPRINT
+    from ml_for_malaria.schemas import KNNMetric, KNNParams, KNNWeights
+    from ml_for_malaria.train import train_knn_classifier
+
+    df = toy_binary_df()
+    result = train_knn_classifier(
+        df,
+        outdir=tmp_path,
+        split="random",
+        seed=0,
+        test_size=0.25,
+        fingerprints=[DEFAULT_FINGERPRINT],
+        fp_size=128,
+    )
+    params = result.report.fingerprint_comparison[DEFAULT_FINGERPRINT].params
+    assert params[KNNParams.metric] == KNNMetric.JACCARD
+    assert params[KNNParams.weights] == KNNWeights.DISTANCE
+    assert result.classifier.model.metric == KNNMetric.JACCARD
+    assert result.classifier.model.n_neighbors == 5
+
+
+def test_train_logistic_uses_l2(tmp_path: Path):
+    from ml_for_malaria.chemistry.featurization import DEFAULT_FINGERPRINT
+    from ml_for_malaria.schemas import (
+        LogisticParams,
+        LogisticSolver,
+        SklearnClassWeight,
+    )
+    from ml_for_malaria.train import train_logistic_classifier
+
+    df = toy_binary_df()
+    result = train_logistic_classifier(
+        df,
+        outdir=tmp_path,
+        split="random",
+        seed=0,
+        test_size=0.25,
+        fingerprints=[DEFAULT_FINGERPRINT],
+        fp_size=128,
+    )
+    params = result.report.fingerprint_comparison[DEFAULT_FINGERPRINT].params
+    assert params[LogisticParams.C] == 1.0
+    assert params[LogisticParams.solver] == LogisticSolver.LBFGS
+    assert params[LogisticParams.class_weight] == SklearnClassWeight.BALANCED
+    assert result.classifier.model.solver == LogisticSolver.LBFGS
+    assert result.classifier.model.C == 1.0
+
+
+@pytest.mark.parametrize(
+    ("train_fn_name", "architecture", "match"),
+    [
+        ("train_knn_classifier", Architecture.KNN, "Tanimoto k-NN"),
+        ("train_logistic_classifier", Architecture.LOGISTIC, "L2-logistic"),
+    ],
+)
+def test_train_sklearn_baseline_rejects_hpo_and_writes_yscramble(
+    tmp_path: Path, train_fn_name: str, architecture: Architecture, match: str
+):
+    from ml_for_malaria.chemistry.featurization import (
+        DEFAULT_FINGERPRINT,
+        clean_training_data,
+    )
+    from ml_for_malaria.train import train_knn_classifier, train_logistic_classifier
+
+    train_fn = {
+        "train_knn_classifier": train_knn_classifier,
+        "train_logistic_classifier": train_logistic_classifier,
+    }[train_fn_name]
+    df = toy_binary_df()
+    with pytest.raises(ValueError, match=match):
+        train_fn(
+            df,
+            outdir=tmp_path,
+            split="random",
+            seed=0,
+            test_size=0.25,
+            fingerprints=["AtomPair"],
+            fp_size=128,
+            max_evals=1,
+        )
+    result = train_fn(
+        df,
+        outdir=tmp_path,
+        split="random",
+        seed=0,
+        test_size=0.25,
+        fingerprints=["AtomPair", DEFAULT_FINGERPRINT],
+        fp_size=128,
+        yscramble=True,
+    )
+    run = resolve_run_dir(tmp_path, architecture, "random", seed=0, yscramble=True)
     assert result.outdir == run
     assert result.report.yscramble is True
     cleaned = pd.read_parquet(run / "cleaned.parquet")

@@ -32,8 +32,27 @@ class JsonModel(BaseModel):
 class Architecture(StrEnum):
     XGBOOST = "xgboost"
     RANDOM_FOREST = "random_forest"
+    KNN = "knn"
+    LOGISTIC = "logistic"
     CHEMPROP = "chemprop"
     CHEMBERTA = "chemberta"
+
+
+FINGERPRINT_ARCHITECTURES = frozenset(
+    {
+        Architecture.XGBOOST,
+        Architecture.RANDOM_FOREST,
+        Architecture.KNN,
+        Architecture.LOGISTIC,
+    }
+)
+SKLEARN_JOBLIB_ARCHITECTURES = frozenset(
+    {
+        Architecture.RANDOM_FOREST,
+        Architecture.KNN,
+        Architecture.LOGISTIC,
+    }
+)
 
 
 class Split(StrEnum):
@@ -54,6 +73,25 @@ class RFMaxFeatures(StrEnum):
 class RFSearchParam(StrEnum):
     MAX_FEATURES_IX = "_max_features_ix"
     BALANCED_IX = "_balanced_ix"
+
+
+class KNNMetric(StrEnum):
+    """Binary Jaccard distance; equal to 1 − Tanimoto on bit vectors."""
+
+    JACCARD = "jaccard"
+
+
+class KNNWeights(StrEnum):
+    DISTANCE = "distance"
+    UNIFORM = "uniform"
+
+
+class KNNAlgorithm(StrEnum):
+    BRUTE = "brute"
+
+
+class LogisticSolver(StrEnum):
+    LBFGS = "lbfgs"
 
 
 class ChargeMethod(StrEnum):
@@ -114,6 +152,22 @@ class RandomForestParams(JsonModel):
     max_features: str = RFMaxFeatures.SQRT
     class_weight: str | None = SklearnClassWeight.BALANCED
     n_jobs: int = 1
+    random_state: int
+
+
+class KNNParams(JsonModel):
+    n_neighbors: int = 5
+    metric: str = KNNMetric.JACCARD
+    weights: str = KNNWeights.DISTANCE
+    algorithm: str = KNNAlgorithm.BRUTE
+    n_jobs: int = 1
+
+
+class LogisticParams(JsonModel):
+    C: float = 1.0
+    class_weight: str | None = SklearnClassWeight.BALANCED
+    solver: str = LogisticSolver.LBFGS
+    max_iter: int = 2000
     random_state: int
 
 

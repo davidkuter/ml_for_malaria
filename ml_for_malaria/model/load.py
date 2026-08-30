@@ -18,6 +18,16 @@ def load_classifier(outdir: str | Path, fingerprint: str | None = None):
         from ml_for_malaria.model.rf_classifier import RFFingerprintClassifier
 
         return RFFingerprintClassifier.load(outdir, fingerprint=fingerprint)
+    if metadata.architecture == Architecture.KNN:
+        from ml_for_malaria.model.knn_classifier import KNNFingerprintClassifier
+
+        return KNNFingerprintClassifier.load(outdir, fingerprint=fingerprint)
+    if metadata.architecture == Architecture.LOGISTIC:
+        from ml_for_malaria.model.logistic_classifier import (
+            LogisticFingerprintClassifier,
+        )
+
+        return LogisticFingerprintClassifier.load(outdir, fingerprint=fingerprint)
     if metadata.architecture == Architecture.CHEMPROP:
         from ml_for_malaria.model.chemprop_classifier import ChempropClassifier
 
