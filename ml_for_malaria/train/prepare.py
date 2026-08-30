@@ -112,3 +112,18 @@ def train_val_indices(
             random_state=seed,
         )
     return fit_idx.tolist(), val_idx.tolist()
+
+
+def scramble_train_labels(
+    labels: pd.Series,
+    train_idx: list[int],
+    seed: int,
+) -> pd.Series:
+    """Permute labels on train rows only. Test positions stay aligned with the assay."""
+    scrambled = labels.copy()
+    train_pos = list(train_idx)
+    shuffled = np.random.default_rng(seed).permutation(
+        scrambled.iloc[train_pos].to_numpy()
+    )
+    scrambled.iloc[train_pos] = shuffled
+    return scrambled

@@ -23,11 +23,17 @@ def run_dirname(
     split: str,
     *,
     charge_method: str | None = None,
+    hpo: bool = False,
+    yscramble: bool = False,
 ) -> str:
-    """Experiment folder name: ``{arch}_{split}``, optional ``_{charge}``."""
+    """Experiment folder: ``{arch}_{split}`` plus optional charge, ``hpo``, ``yscramble``."""
     parts = [architecture_dir_slug(architecture), split]
     if charge_method:
         parts.append(charge_method)
+    if hpo:
+        parts.append("hpo")
+    if yscramble:
+        parts.append("yscramble")
     return "_".join(parts)
 
 
@@ -50,14 +56,23 @@ def resolve_run_dir(
     *,
     charge_method: str | None = None,
     seed: int | None = None,
+    hpo: bool = False,
+    yscramble: bool = False,
 ) -> Path:
     """Resolve the run directory under ``parent``.
 
     Without ``seed`` this is the experiment folder (legacy ``xgb_random``).
     With ``seed`` artifacts live in ``{experiment}/seed_{seed}/``.
+    ``hpo=True`` uses ``{arch}_{split}_hpo`` so tuned runs do not overwrite
+    the fixed-recipe comparison. ``yscramble=True`` appends ``_yscramble``
+    (train labels permuted; test labels unchanged).
     """
     experiment = Path(parent) / run_dirname(
-        architecture, split, charge_method=charge_method
+        architecture,
+        split,
+        charge_method=charge_method,
+        hpo=hpo,
+        yscramble=yscramble,
     )
     if seed is None:
         return experiment

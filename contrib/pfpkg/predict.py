@@ -8,11 +8,11 @@ from ml_for_malaria.schemas import Architecture, Predictions
 
 ROOT = Path(__file__).resolve().parents[2]
 PFPKG = ROOT / "data" / "pfpkg"
-DATA_PATH = PFPKG / "input" / "100nM_Experimental_Azoles.csv"
+DATA_PATH = PFPKG / "input" / "NIBS.csv"
 OUTDIR = resolve_run_dir(
     PFPKG / "runs" / "pfpkg", Architecture.XGBOOST, "scaffold", seed=42
 )
-RESULTS_PATH = OUTDIR / "pfpkg_results.csv"
+RESULTS_PATH = OUTDIR / "nibs_results.csv"
 
 df = pd.read_csv(DATA_PATH)
 df = df.rename(columns={"Smiles": Predictions.SMILES})

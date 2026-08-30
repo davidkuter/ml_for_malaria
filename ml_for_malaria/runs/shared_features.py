@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pandas as pd
@@ -39,7 +40,9 @@ def save_shared_features(
 ) -> None:
     parquet, meta_path = shared_feature_paths(parent, fp_name, fp_size)
     parquet.parent.mkdir(parents=True, exist_ok=True)
-    FingerprintFeatures.validate(features).to_parquet(parquet)
+    tmp = parquet.with_name(parquet.name + ".tmp")
+    FingerprintFeatures.validate(features).to_parquet(tmp)
+    os.replace(tmp, parquet)
     meta_path.write_text(
         json.dumps({RunConfig.cleaned_hash: cleaned_hash, RunConfig.fp_size: fp_size}),
         encoding="utf-8",

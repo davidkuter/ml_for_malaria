@@ -23,7 +23,11 @@ from ml_for_malaria.schemas import (
     RunConfig,
     TrainingReport,
 )
-from ml_for_malaria.train.prepare import prepare_training_run, train_val_indices
+from ml_for_malaria.train.prepare import (
+    prepare_training_run,
+    scramble_train_labels,
+    train_val_indices,
+)
 
 DEFAULT_MAX_EPOCHS = 8
 DEFAULT_BATCH_SIZE = 8
@@ -150,14 +154,18 @@ def train_smiles_transformer(
     batch_size: int = DEFAULT_BATCH_SIZE,
     patience: int = DEFAULT_PATIENCE,
     accelerator: str = "cpu",
+    yscramble: bool = False,
 ) -> TransformerTrainResult:
     """Fine-tune a SMILES transformer on the shared clean/split protocol.
 
     ``outdir`` is the parent runs directory; artifacts go in
-    ``{outdir}/{arch}_{split}/seed_{seed}/``.
+    ``{outdir}/{arch}_{split}[_yscramble]/seed_{seed}/``.
+    ``yscramble=True`` permutes train labels only; test labels stay real.
     """
     _, _, Trainer, _, EarlyStoppingCallback = _require_trainer()
-    outdir = resolve_run_dir(outdir, ARCHITECTURE, split, seed=seed)
+    outdir = resolve_run_dir(
+        outdir, ARCHITECTURE, split, seed=seed, yscramble=yscramble
+    )
     prepared = prepare_training_run(
         df,
         outdir,
@@ -178,6 +186,7 @@ def train_smiles_transformer(
         max_epochs=max_epochs,
         batch_size=batch_size,
         freeze_encoder=freeze_encoder,
+        yscramble=True if yscramble else None,
     )
     if ckpt.run_complete(prepared.stored, expected):
         logger.info(f"Reusing completed transformer run in {ckpt.outdir}")
@@ -188,7 +197,14 @@ def train_smiles_transformer(
         )
 
     cleaned = prepared.cleaned
-    y = cleaned[CleanedTrainingData.LABEL]
+    y_true = cleaned[CleanedTrainingData.LABEL]
+    y = (
+        scramble_train_labels(y_true, prepared.train_idx, seed)
+        if yscramble
+        else y_true
+    )
+    if yscramble:
+        logger.info("Y-scramble: permuted train labels; test labels unchanged")
     smiles = cleaned[CleanedTrainingData.SMILES]
     fit_idx, val_idx = train_val_indices(prepared.train_idx, y, seed=seed)
     tokenizer, model = load_tokenizer_and_model(
@@ -230,13 +246,13 @@ def train_smiles_transformer(
 
     test_smiles = smiles.iloc[prepared.test_idx]
     y_proba = _predict_proba(model, tokenizer, test_smiles)
-    y_true = y.iloc[prepared.test_idx].to_numpy()
-    if y_proba.shape[0] != y_true.shape[0]:
+    y_true_test = y_true.iloc[prepared.test_idx].to_numpy()
+    if y_proba.shape[0] != y_true_test.shape[0]:
         raise RuntimeError(
-            f"ChemBERTa test scores {y_proba.shape[0]} != labels {y_true.shape[0]}"
+            f"ChemBERTa test scores {y_proba.shape[0]} != labels {y_true_test.shape[0]}"
         )
     y_pred = (y_proba >= 0.5).astype(int)
-    test_metrics = compute_test_metrics(y_true, y_pred, y_proba)
+    test_metrics = compute_test_metrics(y_true_test, y_pred, y_proba)
     logger.info(
         f"Transformer test accuracy={test_metrics.accuracy:.3f} "
         f"roc_auc={test_metrics.roc_auc:.3f}"
@@ -257,6 +273,7 @@ def train_smiles_transformer(
         test_metrics=test_metrics,
         architecture=ARCHITECTURE,
         pretrained_name=pretrained_name,
+        yscramble=yscramble,
     )
     write_report(report, ckpt.report_json_path, ckpt.report_md_path)
     ckpt.save_config(expected)

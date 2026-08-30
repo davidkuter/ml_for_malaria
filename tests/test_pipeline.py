@@ -10,6 +10,7 @@ from ml_for_malaria.chemistry import (
     sanitize_smiles,
 )
 from ml_for_malaria.report import (
+    best_fixed_scaffold_identifier,
     build_report,
     compute_test_metrics,
     report_to_markdown,
@@ -27,6 +28,7 @@ from ml_for_malaria.schemas import (
     Architecture,
     ChargeMethod,
     CleanedTrainingData,
+    ComparisonRow,
     ComparisonTable,
     EvalMetrics,
     FingerprintComparison,
@@ -36,6 +38,7 @@ from ml_for_malaria.schemas import (
     RunConfig,
 )
 from ml_for_malaria.split import ScaffoldSplitter, get_splitter, murcko_group_keys
+from ml_for_malaria.train.prepare import scramble_train_labels
 from tests.toy_data import toy_binary_df
 
 
@@ -56,6 +59,21 @@ def test_run_dirname_encodes_architecture_split_and_charge():
     )
     assert run_dirname(Architecture.CHEMBERTA, "scaffold") == "chemberta_scaffold"
     assert run_dirname(Architecture.RANDOM_FOREST, "scaffold") == "rf_scaffold"
+    assert (
+        run_dirname(Architecture.XGBOOST, "scaffold", hpo=True) == "xgb_scaffold_hpo"
+    )
+    assert (
+        run_dirname(Architecture.RANDOM_FOREST, "scaffold", hpo=True)
+        == "rf_scaffold_hpo"
+    )
+    assert (
+        run_dirname(Architecture.RANDOM_FOREST, "scaffold", yscramble=True)
+        == "rf_scaffold_yscramble"
+    )
+    assert (
+        run_dirname(Architecture.XGBOOST, "scaffold", hpo=True, yscramble=True)
+        == "xgb_scaffold_hpo_yscramble"
+    )
     parent = Path("runs")
     assert (
         resolve_run_dir(parent, Architecture.XGBOOST, "random") == parent / "xgb_random"
@@ -63,6 +81,16 @@ def test_run_dirname_encodes_architecture_split_and_charge():
     assert (
         resolve_run_dir(parent, Architecture.XGBOOST, "scaffold", seed=42)
         == parent / "xgb_scaffold" / "seed_42"
+    )
+    assert (
+        resolve_run_dir(
+            parent,
+            Architecture.XGBOOST,
+            "scaffold",
+            seed=42,
+            hpo=True,
+        )
+        == parent / "xgb_scaffold_hpo" / "seed_42"
     )
     assert (
         resolve_run_dir(parent, Architecture.RANDOM_FOREST, "random", seed=42)
@@ -78,6 +106,20 @@ def test_run_dirname_encodes_architecture_split_and_charge():
         )
         == parent / "chemprop_scaffold_nagl" / "seed_42"
     )
+    assert (
+        resolve_run_dir(
+            parent,
+            Architecture.RANDOM_FOREST,
+            "random",
+            seed=0,
+            yscramble=True,
+        )
+        == parent / "rf_random_yscramble" / "seed_0"
+    )
+
+
+def _double_seed(seed: int) -> int:
+    return seed * 2
 
 
 def test_replicate_seeds_consecutive_from_start():
@@ -87,6 +129,25 @@ def test_replicate_seeds_consecutive_from_start():
     assert seed_dir_name(42) == "seed_42"
     with pytest.raises(ValueError, match="n_rep"):
         replicate_seeds(0)
+
+
+def test_replicate_worker_count_serial_gpu_and_auto():
+    from ml_for_malaria.runs import replicate_worker_count
+
+    assert replicate_worker_count(10, n_workers=1) == 1
+    assert replicate_worker_count(10, serial=True) == 1
+    assert replicate_worker_count(1) == 1
+    auto = replicate_worker_count(10)
+    assert 1 <= auto <= 10
+    assert replicate_worker_count(10, n_workers=3) == 3
+    assert replicate_worker_count(2, n_workers=8) == 2
+
+
+def test_map_replicates_preserves_order():
+    from ml_for_malaria.runs import map_replicates
+
+    assert map_replicates(_double_seed, [1, 2, 3], n_workers=1) == [2, 4, 6]
+    assert map_replicates(_double_seed, [1, 2, 3], n_workers=2) == [2, 4, 6]
 
 
 def test_completed_run_dirs_lists_report_json(tmp_path: Path):
@@ -140,6 +201,19 @@ def test_scaffold_splitter_keeps_murcko_groups_together():
     assert test_idx == again_test
     other_train, other_test = splitter.split(smiles, labels, test_size=0.25, seed=1)
     assert (train_idx, test_idx) != (other_train, other_test)
+
+
+def test_scramble_train_labels_permutes_train_only():
+    labels = pd.Series([0, 1, 0, 1, 0, 1, 0, 1])
+    train_idx = [0, 1, 2, 3, 4, 5]
+    test_idx = [6, 7]
+    scrambled = scramble_train_labels(labels, train_idx, seed=0)
+    assert scrambled.iloc[test_idx].tolist() == labels.iloc[test_idx].tolist()
+    assert sorted(scrambled.iloc[train_idx].tolist()) == sorted(
+        labels.iloc[train_idx].tolist()
+    )
+    assert scrambled.iloc[train_idx].tolist() != labels.iloc[train_idx].tolist()
+    assert scramble_train_labels(labels, train_idx, seed=0).equals(scrambled)
 
 
 def test_random_splitter_is_stratified():
@@ -415,8 +489,11 @@ def test_train_xgb_classifier_smoke_and_checkpoint_reuse(tmp_path: Path):
         fingerprints=["AtomPair"],
         fp_size=128,
     )
-    run = resolve_run_dir(tmp_path, Architecture.XGBOOST, "random", seed=0)
+    run = resolve_run_dir(
+        tmp_path, Architecture.XGBOOST, "random", seed=0, hpo=True
+    )
     assert result.outdir == run
+    assert result.report.max_evals == 1
     assert result.report.best_fingerprint == "AtomPair"
     assert result.report.architecture == Architecture.XGBOOST
     assert (run / "report.json").exists()
@@ -527,6 +604,77 @@ def test_train_rf_classifier_smoke_and_checkpoint_reuse(tmp_path: Path):
     assert reused.report.test_metrics.roc_auc == result.report.test_metrics.roc_auc
 
 
+def test_train_rf_classifier_hpo_writes_hpo_run_dir(tmp_path: Path):
+    from ml_for_malaria.train import train_rf_classifier
+
+    df = toy_binary_df()
+    result = train_rf_classifier(
+        df,
+        outdir=tmp_path,
+        split="random",
+        seed=0,
+        test_size=0.25,
+        fingerprints=["AtomPair"],
+        fp_size=128,
+        max_evals=1,
+    )
+    run = resolve_run_dir(
+        tmp_path, Architecture.RANDOM_FOREST, "random", seed=0, hpo=True
+    )
+    assert result.outdir == run
+    assert result.report.max_evals == 1
+    score = result.report.fingerprint_comparison["AtomPair"]
+    assert score.cv_auc is not None
+    assert (run / "hyperopt" / "AtomPair.json").exists()
+    markdown = (run / "report.md").read_text(encoding="utf-8")
+    assert "train folds only" in markdown
+
+
+def test_train_rf_classifier_yscramble_writes_yscramble_run_dir(tmp_path: Path):
+    from ml_for_malaria.chemistry.featurization import (
+        DEFAULT_FINGERPRINT,
+        clean_training_data,
+    )
+    from ml_for_malaria.train import train_rf_classifier
+
+    df = toy_binary_df()
+    with pytest.raises(ValueError, match="Y-scramble"):
+        train_rf_classifier(
+            df,
+            outdir=tmp_path,
+            split="random",
+            seed=0,
+            test_size=0.25,
+            fingerprints=["AtomPair"],
+            fp_size=128,
+            max_evals=1,
+            yscramble=True,
+        )
+    result = train_rf_classifier(
+        df,
+        outdir=tmp_path,
+        split="random",
+        seed=0,
+        test_size=0.25,
+        fingerprints=["AtomPair", DEFAULT_FINGERPRINT],
+        fp_size=128,
+        yscramble=True,
+    )
+    run = resolve_run_dir(
+        tmp_path, Architecture.RANDOM_FOREST, "random", seed=0, yscramble=True
+    )
+    assert result.outdir == run
+    assert result.report.yscramble is True
+    cleaned = pd.read_parquet(run / "cleaned.parquet")
+    expected = clean_training_data(df)
+    assert (
+        cleaned[CleanedTrainingData.LABEL].tolist()
+        == expected[CleanedTrainingData.LABEL].tolist()
+    )
+    markdown = (run / "report.md").read_text(encoding="utf-8")
+    assert "y-scrambled" in markdown
+
+
 def test_comparison_report_aggregates_mean_std_across_seeds(tmp_path: Path):
     left = tmp_path / "seed42"
     right = tmp_path / "seed43"
@@ -567,3 +715,209 @@ def test_comparison_report_aggregates_mean_std_across_seeds(tmp_path: Path):
     assert comparison.aggregates[0].roc_auc_std is not None
     markdown = (tmp_path / "comparison.md").read_text(encoding="utf-8")
     assert "±" in markdown
+
+
+def test_comparison_report_annotates_hpo_improvement(tmp_path: Path):
+    fixed = tmp_path / "fixed"
+    weaker = tmp_path / "weaker"
+    tuned = tmp_path / "hpo"
+    fixed.mkdir()
+    weaker.mkdir()
+    tuned.mkdir()
+    base = compute_test_metrics([0, 1], [0, 1], [0.1, 0.9])
+    write_report(
+        build_report(
+            split="scaffold",
+            seed=42,
+            test_size=0.2,
+            n_train=10,
+            n_test=4,
+            test_metrics=base.model_copy(
+                update={EvalMetrics.roc_auc: 0.80, EvalMetrics.pr_auc: 0.75}
+            ),
+            architecture=Architecture.XGBOOST,
+            best_fingerprint="RDKit",
+        ),
+        fixed / "report.json",
+        fixed / "report.md",
+    )
+    write_report(
+        build_report(
+            split="scaffold",
+            seed=42,
+            test_size=0.2,
+            n_train=10,
+            n_test=4,
+            test_metrics=base.model_copy(
+                update={EvalMetrics.roc_auc: 0.70, EvalMetrics.pr_auc: 0.65}
+            ),
+            architecture=Architecture.XGBOOST,
+            best_fingerprint="AtomPair",
+        ),
+        weaker / "report.json",
+        weaker / "report.md",
+    )
+    write_report(
+        build_report(
+            split="scaffold",
+            seed=42,
+            test_size=0.2,
+            n_train=10,
+            n_test=4,
+            test_metrics=base.model_copy(
+                update={EvalMetrics.roc_auc: 0.85, EvalMetrics.pr_auc: 0.82}
+            ),
+            architecture=Architecture.XGBOOST,
+            best_fingerprint="RDKit",
+            max_evals=50,
+        ),
+        tuned / "report.json",
+        tuned / "report.md",
+    )
+    comparison = write_comparison_report(
+        [fixed, weaker, tuned], tmp_path / "comparison.md"
+    )
+    assert len(comparison.hpo_deltas) == 1
+    delta = comparison.hpo_deltas[0]
+    assert delta.identifier == "RDKit"
+    assert delta.roc_auc_fixed == pytest.approx(0.80)
+    assert delta.roc_auc_hpo == pytest.approx(0.85)
+    assert delta.roc_auc_delta == pytest.approx(0.05)
+    assert (
+        best_fixed_scaffold_identifier(comparison.aggregates, Architecture.XGBOOST)
+        == "RDKit"
+    )
+    markdown = (tmp_path / "comparison.md").read_text(encoding="utf-8")
+    assert "HPO improvement vs fixed recipe" in markdown
+    assert ComparisonRow.hpo in markdown or "True" in markdown
+
+
+def test_comparison_report_random_rf_references_best_scaffold(tmp_path: Path):
+    random_run = tmp_path / "random"
+    scaffold_best = tmp_path / "scaffold_best"
+    scaffold_other = tmp_path / "scaffold_other"
+    random_run.mkdir()
+    scaffold_best.mkdir()
+    scaffold_other.mkdir()
+    base = compute_test_metrics([0, 1], [0, 1], [0.1, 0.9])
+    write_report(
+        build_report(
+            split="random",
+            seed=42,
+            test_size=0.2,
+            n_train=10,
+            n_test=8,
+            test_metrics=base.model_copy(
+                update={EvalMetrics.roc_auc: 0.90, EvalMetrics.pr_auc: 0.88}
+            ),
+            architecture=Architecture.RANDOM_FOREST,
+            best_fingerprint="AtomPair",
+        ),
+        random_run / "report.json",
+        random_run / "report.md",
+    )
+    write_report(
+        build_report(
+            split="scaffold",
+            seed=42,
+            test_size=0.2,
+            n_train=10,
+            n_test=4,
+            test_metrics=base.model_copy(
+                update={EvalMetrics.roc_auc: 0.93, EvalMetrics.pr_auc: 0.92}
+            ),
+            architecture=Architecture.RANDOM_FOREST,
+            best_fingerprint="Morgan2Bits",
+        ),
+        scaffold_best / "report.json",
+        scaffold_best / "report.md",
+    )
+    write_report(
+        build_report(
+            split="scaffold",
+            seed=42,
+            test_size=0.2,
+            n_train=10,
+            n_test=4,
+            test_metrics=base.model_copy(
+                update={EvalMetrics.roc_auc: 0.88, EvalMetrics.pr_auc: 0.85}
+            ),
+            architecture=Architecture.RANDOM_FOREST,
+            best_fingerprint="AtomPair",
+        ),
+        scaffold_other / "report.json",
+        scaffold_other / "report.md",
+    )
+    comparison = write_comparison_report(
+        [random_run, scaffold_best, scaffold_other], tmp_path / "comparison.md"
+    )
+    assert len(comparison.split_references) == 1
+    ref = comparison.split_references[0]
+    assert ref.identifier == "AtomPair"
+    assert ref.reference_identifier == "Morgan2Bits"
+    assert ref.roc_auc == pytest.approx(0.90)
+    assert ref.roc_auc_reference == pytest.approx(0.93)
+    assert ref.roc_auc_delta == pytest.approx(-0.03)
+    markdown = (tmp_path / "comparison.md").read_text(encoding="utf-8")
+    assert "Random split vs best scaffold (reference)" in markdown
+    assert "Morgan2Bits" in markdown
+
+
+def test_comparison_report_annotates_yscramble_drop(tmp_path: Path):
+    real = tmp_path / "real"
+    scramble = tmp_path / "yscramble"
+    real.mkdir()
+    scramble.mkdir()
+    base = compute_test_metrics([0, 1], [0, 1], [0.1, 0.9])
+    write_report(
+        build_report(
+            split="scaffold",
+            seed=42,
+            test_size=0.2,
+            n_train=10,
+            n_test=4,
+            test_metrics=base.model_copy(
+                update={EvalMetrics.roc_auc: 0.93, EvalMetrics.pr_auc: 0.92}
+            ),
+            architecture=Architecture.RANDOM_FOREST,
+            best_fingerprint="Morgan2Bits",
+        ),
+        real / "report.json",
+        real / "report.md",
+    )
+    write_report(
+        build_report(
+            split="scaffold",
+            seed=42,
+            test_size=0.2,
+            n_train=10,
+            n_test=4,
+            test_metrics=base.model_copy(
+                update={EvalMetrics.roc_auc: 0.52, EvalMetrics.pr_auc: 0.51}
+            ),
+            architecture=Architecture.RANDOM_FOREST,
+            best_fingerprint="Morgan2Bits",
+            yscramble=True,
+        ),
+        scramble / "report.json",
+        scramble / "report.md",
+    )
+    comparison = write_comparison_report(
+        [real, scramble], tmp_path / "comparison.md"
+    )
+    assert len(comparison.yscramble_deltas) == 1
+    delta = comparison.yscramble_deltas[0]
+    assert delta.identifier == "Morgan2Bits"
+    assert delta.roc_auc_real == pytest.approx(0.93)
+    assert delta.roc_auc_scramble == pytest.approx(0.52)
+    assert delta.roc_auc_delta == pytest.approx(-0.41)
+    assert (
+        best_fixed_scaffold_identifier(
+            comparison.aggregates, Architecture.RANDOM_FOREST
+        )
+        == "Morgan2Bits"
+    )
+    markdown = (tmp_path / "comparison.md").read_text(encoding="utf-8")
+    assert "Y-scramble (train labels permuted)" in markdown
+
+

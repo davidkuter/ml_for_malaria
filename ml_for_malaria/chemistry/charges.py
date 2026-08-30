@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import threading
 from pathlib import Path
 
@@ -183,7 +184,9 @@ def load_charge_cache(path: str | Path) -> pd.DataFrame:
 def save_charge_cache(path: str | Path, cache: pd.DataFrame) -> None:
     cache_path = Path(path)
     cache_path.parent.mkdir(parents=True, exist_ok=True)
-    AtomChargeCache.validate(cache).to_parquet(cache_path, index=False)
+    tmp = cache_path.with_name(cache_path.name + ".tmp")
+    AtomChargeCache.validate(cache).to_parquet(tmp, index=False)
+    os.replace(tmp, cache_path)
 
 
 def _charges_from_cache_row(values) -> np.ndarray:

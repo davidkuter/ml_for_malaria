@@ -104,3 +104,57 @@ def test_chemberta_tiny_test_does_not_download(tmp_path: Path):
     loaded = load_classifier(run)
     assert loaded.metadata.pretrained_name == TINY_TEST_NAME
     assert len(loaded.predict(["CCO"])) == 1
+
+
+def test_chemprop_yscramble_writes_yscramble_run_dir(tmp_path: Path):
+    pytest.importorskip("chemprop")
+    pytest.importorskip("lightning")
+    from ml_for_malaria.train.chemprop import train_chemprop_classifier
+
+    result = train_chemprop_classifier(
+        toy_binary_df(),
+        outdir=tmp_path,
+        split="random",
+        seed=0,
+        test_size=0.25,
+        charge_method=None,
+        max_epochs=1,
+        batch_size=8,
+        hidden_size=16,
+        depth=2,
+        patience=1,
+        accelerator="cpu",
+        force=True,
+        yscramble=True,
+    )
+    run = resolve_run_dir(
+        tmp_path, Architecture.CHEMPROP, "random", seed=0, yscramble=True
+    )
+    assert result.outdir == run
+    assert result.report.yscramble is True
+
+
+def test_chemberta_yscramble_writes_yscramble_run_dir(tmp_path: Path):
+    pytest.importorskip("transformers")
+    pytest.importorskip("torch")
+    from ml_for_malaria.train.chemberta import train_smiles_transformer
+
+    result = train_smiles_transformer(
+        toy_binary_df(),
+        outdir=tmp_path,
+        split="random",
+        seed=0,
+        test_size=0.25,
+        pretrained_name=TINY_TEST_NAME,
+        freeze_encoder=True,
+        max_epochs=1,
+        batch_size=8,
+        accelerator="cpu",
+        force=True,
+        yscramble=True,
+    )
+    run = resolve_run_dir(
+        tmp_path, Architecture.CHEMBERTA, "random", seed=0, yscramble=True
+    )
+    assert result.outdir == run
+    assert result.report.yscramble is True

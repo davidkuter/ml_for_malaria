@@ -33,7 +33,11 @@ from ml_for_malaria.schemas import (
     RunConfig,
     TrainingReport,
 )
-from ml_for_malaria.train.prepare import prepare_training_run, train_val_indices
+from ml_for_malaria.train.prepare import (
+    prepare_training_run,
+    scramble_train_labels,
+    train_val_indices,
+)
 
 DEFAULT_MAX_EPOCHS = 50
 DEFAULT_BATCH_SIZE = 32
@@ -184,13 +188,15 @@ def train_chemprop_classifier(
     patience: int = DEFAULT_PATIENCE,
     accelerator: str = "auto",
     n_jobs: int | None = None,
+    yscramble: bool = False,
 ) -> ChempropTrainResult:
     """Train a Chemprop D-MPNN on the shared clean/split protocol.
 
     ``outdir`` is the parent runs directory; artifacts go in
-    ``{outdir}/{arch}_{split}[_charge]/seed_{seed}/`` when ``seed`` is passed through
+    ``{outdir}/{arch}_{split}[_charge][_yscramble]/seed_{seed}/`` when ``seed`` is passed through
     ``resolve_run_dir``.
     ``n_jobs`` defaults to all cores for NAGL charges and 1 otherwise.
+    ``yscramble=True`` permutes train labels only; test labels stay real.
     """
     (
         pl,
@@ -212,7 +218,12 @@ def train_chemprop_classifier(
         workers = 1
     parent = Path(outdir)
     outdir = resolve_run_dir(
-        parent, ARCHITECTURE, split, charge_method=charge_method, seed=seed
+        parent,
+        ARCHITECTURE,
+        split,
+        charge_method=charge_method,
+        seed=seed,
+        yscramble=yscramble,
     )
     cache_file = (
         charge_cache_path(parent, charge_method) if charge_method is not None else None
@@ -237,6 +248,7 @@ def train_chemprop_classifier(
         max_epochs=max_epochs,
         batch_size=batch_size,
         hidden_size=hidden_size,
+        yscramble=True if yscramble else None,
     )
     if ckpt.run_complete(prepared.stored, expected):
         logger.info(f"Reusing completed Chemprop run in {ckpt.outdir}")
@@ -248,7 +260,15 @@ def train_chemprop_classifier(
 
     require_charge_backend(charge_method)
     cleaned = prepared.cleaned
-    y = cleaned[CleanedTrainingData.LABEL]
+    y_true = cleaned[CleanedTrainingData.LABEL]
+    y = (
+        scramble_train_labels(y_true, prepared.train_idx, seed)
+        if yscramble
+        else y_true
+    )
+    if yscramble:
+        logger.info("Y-scramble: permuted train labels; test labels unchanged")
+    fit_labels = cleaned.assign(**{CleanedTrainingData.LABEL: y})
     fit_idx, val_idx = train_val_indices(prepared.train_idx, y, seed=seed)
     charge_note = f" with {charge_method} charges" if charge_method else ""
     logger.info(
@@ -259,7 +279,7 @@ def train_chemprop_classifier(
     started = time.perf_counter()
     (train_points, train_kept), (val_points, val_kept), (test_points, test_kept) = (
         _datapoints_for_index_groups(
-            cleaned,
+            fit_labels,
             [fit_idx, val_idx, prepared.test_idx],
             charge_method,
             workers,
@@ -368,9 +388,9 @@ def train_chemprop_classifier(
         raise RuntimeError(
             f"Chemprop test scores {y_proba.shape[0]} != kept test mols {len(test_kept)}"
         )
-    y_true = y.iloc[test_kept].to_numpy()
+    y_true_test = y_true.iloc[test_kept].to_numpy()
     y_pred = (y_proba >= 0.5).astype(int)
-    test_metrics = compute_test_metrics(y_true, y_pred, y_proba)
+    test_metrics = compute_test_metrics(y_true_test, y_pred, y_proba)
     logger.info(
         f"Chemprop test accuracy={test_metrics.accuracy:.3f} "
         f"roc_auc={test_metrics.roc_auc:.3f}"
@@ -396,6 +416,7 @@ def train_chemprop_classifier(
         test_metrics=test_metrics,
         architecture=ARCHITECTURE,
         charge_method=charge_method,
+        yscramble=yscramble,
     )
     write_report(report, ckpt.report_json_path, ckpt.report_md_path)
     ckpt.save_config(expected)

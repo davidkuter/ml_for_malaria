@@ -33,7 +33,11 @@ from ml_for_malaria.schemas import (
     XGBParams,
 )
 from ml_for_malaria.train.fingerprint_features import fingerprint_features_for_run
-from ml_for_malaria.train.prepare import prepare_training_run, train_val_indices
+from ml_for_malaria.train.prepare import (
+    prepare_training_run,
+    scramble_train_labels,
+    train_val_indices,
+)
 
 NUM_BOOST_ROUND = 1000
 EARLY_STOPPING_ROUNDS = 20
@@ -137,15 +141,15 @@ def default_xgb_params(seed: int, n_estimators: int = DEFAULT_N_ESTIMATORS) -> X
 def train_cross_validation_model(
     dtrain: xgb.DMatrix, seed: int, max_evals: int = HYPEROPT_EVALS
 ) -> HyperoptResult:
-    """TPE hyperparameter search; returns sklearn params, CV AUC, and n_estimators."""
+    """TPE search on train folds. Bounds are sized for small n (hundreds of compounds)."""
     logger.info("Hyperparameter optimisation")
     space = {
         XGBParams.objective: OBJECTIVE,
         XGBParams.eval_metric: "auc",
         HyperoptInjected.dtrain: dtrain,
-        XGBParams.alpha: hp.quniform(XGBParams.alpha, 10, 200, 1),
-        XGBParams.gamma: hp.uniform(XGBParams.gamma, 1, 9),
-        XGBParams.reg_lambda: hp.uniform(XGBParams.reg_lambda, 0, 1),
+        XGBParams.alpha: hp.quniform(XGBParams.alpha, 0, 10, 1),
+        XGBParams.gamma: hp.uniform(XGBParams.gamma, 0, 5),
+        XGBParams.reg_lambda: hp.uniform(XGBParams.reg_lambda, 0.1, 10),
         XGBParams.colsample_bytree: hp.uniform(XGBParams.colsample_bytree, 0.5, 1),
         XGBParams.min_child_weight: hp.quniform(XGBParams.min_child_weight, 0, 10, 1),
         XGBParams.max_depth: hp.uniformint(XGBParams.max_depth, 3, 18),
@@ -187,6 +191,7 @@ def _fit_fingerprint_model(
     *,
     fit_idx: list[int] | None = None,
     val_idx: list[int] | None = None,
+    y_test: pd.Series | None = None,
 ) -> tuple[XGBClassifier, EvalMetrics, int]:
     early_stop = fit_idx is not None and val_idx is not None
     xgb_clf = XGBClassifier(**_classifier_kwargs(params, early_stopping=early_stop))
@@ -201,9 +206,10 @@ def _fit_fingerprint_model(
     else:
         xgb_clf.fit(features.iloc[train_idx], y.iloc[train_idx])
         n_estimators = int(params.n_estimators)
+    y_eval = y if y_test is None else y_test
     y_pred = xgb_clf.predict(features.iloc[test_idx])
     y_proba = xgb_clf.predict_proba(features.iloc[test_idx])[:, 1]
-    test_metrics = compute_test_metrics(y.iloc[test_idx], y_pred, y_proba)
+    test_metrics = compute_test_metrics(y_eval.iloc[test_idx], y_pred, y_proba)
     final = params.model_copy(update={XGBParams.n_estimators: n_estimators})
     saved = XGBClassifier(**_classifier_kwargs(final, early_stopping=False))
     saved.fit(features, y)
@@ -220,17 +226,29 @@ def train_xgb_classifier(
     fp_size: int = DEFAULT_FP_SIZE,
     max_evals: int = HYPEROPT_EVALS,
     fingerprints: list[str] | None = None,
+    yscramble: bool = False,
 ) -> XGBTrainResult:
     """Train an XGBoost fingerprint classifier with checkpointed intermediate results.
 
     ``df`` must contain SMILES and LABEL (0/1) columns.
     ``outdir`` is the parent runs directory; artifacts go in
-    ``{outdir}/{arch}_{split}/seed_{seed}/``. ``max_evals=0`` skips TPE and k-fold
+    ``{outdir}/{arch}_{split}[_hpo][_yscramble]/seed_{seed}/``. ``max_evals=0`` skips TPE and k-fold
     CV (fixed params + inner-val early stopping). ``max_evals>=1`` keeps the
     CV-AUC selector. Every fingerprint is scored on the frozen test split.
+    ``yscramble=True`` permutes train labels only; test labels stay real.
     """
+    if yscramble and max_evals > 0:
+        raise ValueError("Y-scramble uses the fixed recipe; do not combine with HPO")
     parent = Path(outdir)
-    outdir = resolve_run_dir(parent, ARCHITECTURE, split, seed=seed)
+    skip_hyperopt = max_evals <= 0
+    outdir = resolve_run_dir(
+        parent,
+        ARCHITECTURE,
+        split,
+        seed=seed,
+        hpo=not skip_hyperopt,
+        yscramble=yscramble,
+    )
     prepared = prepare_training_run(
         df,
         outdir,
@@ -258,6 +276,7 @@ def train_xgb_classifier(
         fingerprints=selected,
         architecture=ARCHITECTURE,
         cleaned_hash=prepared.cleaned_hash,
+        yscramble=True if yscramble else None,
     )
 
     if ckpt.run_complete(prepared.stored, expected):
@@ -275,7 +294,14 @@ def train_xgb_classifier(
     train_idx = prepared.train_idx
     test_idx = prepared.test_idx
     generators = {name: available[name] for name in selected}
-    y = cleaned[CleanedTrainingData.LABEL]
+    y_true = cleaned[CleanedTrainingData.LABEL]
+    y = (
+        scramble_train_labels(y_true, train_idx, seed)
+        if yscramble
+        else y_true
+    )
+    if yscramble:
+        logger.info("Y-scramble: permuted train labels; test labels unchanged")
     fingerprint_comparison: dict[str, FingerprintScore] = {}
     stored = prepared.stored
     fit_idx, val_idx = train_val_indices(train_idx, y, seed=seed)
@@ -305,6 +331,7 @@ def train_xgb_classifier(
                 params,
                 fit_idx=fit_idx,
                 val_idx=val_idx,
+                y_test=y_true,
             )
             params = params.model_copy(update={XGBParams.n_estimators: n_estimators})
             logger.info(f"{fp_name}: test ROC-AUC={test_metrics.roc_auc:.4f}")
@@ -344,7 +371,7 @@ def train_xgb_classifier(
             )
             logger.info(f"Validating {fp_name} on held-out test split")
             xgb_clf, test_metrics, n_estimators = _fit_fingerprint_model(
-                features, y, train_idx, test_idx, params
+                features, y, train_idx, test_idx, params, y_test=y_true
             )
             logger.info(
                 f"{fp_name}: CV AUC={hp_result.cv_auc:.4f} "
@@ -400,6 +427,8 @@ def train_xgb_classifier(
         fingerprint_comparison=fingerprint_comparison,
         test_metrics=best.test_metrics,
         architecture=ARCHITECTURE,
+        max_evals=max_evals if max_evals > 0 else None,
+        yscramble=yscramble,
     )
     write_report(report, ckpt.report_json_path, ckpt.report_md_path)
     ckpt.save_config(expected)

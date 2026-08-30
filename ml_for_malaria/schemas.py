@@ -36,6 +36,11 @@ class Architecture(StrEnum):
     CHEMBERTA = "chemberta"
 
 
+class Split(StrEnum):
+    RANDOM = "random"
+    SCAFFOLD = "scaffold"
+
+
 class SklearnClassWeight(StrEnum):
     BALANCED = "balanced"
     BALANCED_SUBSAMPLE = "balanced_subsample"
@@ -44,6 +49,11 @@ class SklearnClassWeight(StrEnum):
 class RFMaxFeatures(StrEnum):
     SQRT = "sqrt"
     LOG2 = "log2"
+
+
+class RFSearchParam(StrEnum):
+    MAX_FEATURES_IX = "_max_features_ix"
+    BALANCED_IX = "_balanced_ix"
 
 
 class ChargeMethod(StrEnum):
@@ -109,6 +119,8 @@ class RandomForestParams(JsonModel):
 
 class HyperoptInjected(JsonModel):
     dtrain: Any
+    features: Any
+    labels: Any
 
 
 class HyperoptObjectiveResult(JsonModel):
@@ -120,6 +132,12 @@ class HyperoptObjectiveResult(JsonModel):
 
 class HyperoptResult(JsonModel):
     params: XGBParams
+    cv_auc: float
+    n_estimators: int
+
+
+class RFHyperoptResult(JsonModel):
+    params: RandomForestParams
     cv_auc: float
     n_estimators: int
 
@@ -152,6 +170,7 @@ class RunConfig(JsonModel):
     charge_method: str | None = None
     freeze_encoder: bool | None = None
     hidden_size: int | None = None
+    yscramble: bool | None = None
 
 
 class ModelMeta(JsonModel):
@@ -177,6 +196,8 @@ class TrainingReport(JsonModel):
     fingerprint_comparison: dict[str, FingerprintScore] = Field(default_factory=dict)
     charge_method: str | None = None
     pretrained_name: str | None = None
+    max_evals: int | None = None
+    yscramble: bool = False
 
 
 class ComparisonRow(JsonModel):
@@ -196,6 +217,8 @@ class ComparisonRow(JsonModel):
     test_size: float
     cleaned_hash: str | None = None
     outdir: str
+    hpo: bool = False
+    yscramble: bool = False
 
 
 class ComparisonAggregate(JsonModel):
@@ -218,11 +241,72 @@ class ComparisonAggregate(JsonModel):
     f1_1_std: float | None = None
     weighted_f1_mean: float
     weighted_f1_std: float | None = None
+    hpo: bool = False
+    yscramble: bool = False
+
+
+class ComparisonHpoDelta(JsonModel):
+    architecture: str
+    identifier: str
+    split: str
+    n_seeds: int
+    roc_auc_fixed: float
+    roc_auc_hpo: float
+    roc_auc_delta: float
+    pr_auc_fixed: float
+    pr_auc_hpo: float
+    pr_auc_delta: float
+    weighted_f1_fixed: float
+    weighted_f1_hpo: float
+    weighted_f1_delta: float
+    charge_method: str | None = None
+
+
+class ComparisonYscrambleDelta(JsonModel):
+    architecture: str
+    identifier: str
+    split: str
+    n_seeds: int
+    roc_auc_real: float
+    roc_auc_scramble: float
+    roc_auc_delta: float
+    pr_auc_real: float
+    pr_auc_scramble: float
+    pr_auc_delta: float
+    weighted_f1_real: float
+    weighted_f1_scramble: float
+    weighted_f1_delta: float
+    charge_method: str | None = None
+
+
+class ComparisonSplitReference(JsonModel):
+    """Random-split diagnostic vs the best fixed-recipe scaffold row of the same architecture."""
+
+    architecture: str
+    identifier: str
+    split: str
+    reference_identifier: str
+    reference_split: str
+    n_seeds: int
+    n_test: float
+    n_test_reference: float
+    roc_auc: float
+    roc_auc_reference: float
+    roc_auc_delta: float
+    pr_auc: float
+    pr_auc_reference: float
+    pr_auc_delta: float
+    weighted_f1: float
+    weighted_f1_reference: float
+    weighted_f1_delta: float
 
 
 class ComparisonReport(JsonModel):
     rows: list[ComparisonRow]
     aggregates: list[ComparisonAggregate] = Field(default_factory=list)
+    hpo_deltas: list[ComparisonHpoDelta] = Field(default_factory=list)
+    yscramble_deltas: list[ComparisonYscrambleDelta] = Field(default_factory=list)
+    split_references: list[ComparisonSplitReference] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
 
 
