@@ -1,0 +1,442 @@
+from __future__ import annotations
+
+import shutil
+from dataclasses import dataclass
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import xgboost as xgb
+from hyperopt import STATUS_OK, Trials, fmin, hp, tpe
+from loguru import logger
+from xgboost import XGBClassifier
+
+from ml_for_malaria.chemistry.featurization import (
+    DEFAULT_FP_SIZE,
+    default_saved_fingerprint,
+    get_fingerprint_generators,
+)
+from ml_for_malaria.model.xgb_classifier import ARCHITECTURE, XGBFingerprintClassifier
+from ml_for_malaria.report import build_report, compute_test_metrics, write_report
+from ml_for_malaria.runs.checkpoints import to_jsonable
+from ml_for_malaria.runs.paths import resolve_run_dir
+from ml_for_malaria.schemas import (
+    CleanedTrainingData,
+    EvalMetrics,
+    FingerprintScore,
+    HyperoptInjected,
+    HyperoptObjectiveResult,
+    HyperoptResult,
+    ModelMeta,
+    RunConfig,
+    TrainingReport,
+    XGBParams,
+)
+from ml_for_malaria.train.fingerprint_features import fingerprint_features_for_run
+from ml_for_malaria.train.prepare import (
+    prepare_training_run,
+    scramble_train_labels,
+    train_val_indices,
+)
+
+NUM_BOOST_ROUND = 1000
+EARLY_STOPPING_ROUNDS = 20
+HYPEROPT_EVALS = 100
+DEFAULT_N_ESTIMATORS = 200
+OBJECTIVE = "binary:logistic"
+_XGB_CV_AUC = "test-auc-mean"
+_INT_XGB_PARAMS = (
+    XGBParams.alpha,
+    XGBParams.max_depth,
+    XGBParams.min_child_weight,
+)
+_TREE_METHOD = "hist"
+
+
+@dataclass
+class XGBTrainResult:
+    model: XGBClassifier
+    classifier: XGBFingerprintClassifier
+    report: TrainingReport
+    outdir: Path
+
+
+def _int_params(params: dict) -> dict:
+    converted = dict(params)
+    for key in _INT_XGB_PARAMS:
+        if key in converted:
+            converted[key] = int(converted[key])
+    return converted
+
+
+def hyperparameterisation(params: dict) -> dict:
+    """Hyperopt objective: 5-fold XGBoost CV, loss = -AUC."""
+    params = _int_params(dict(params))
+    dtrain = params.pop(HyperoptInjected.dtrain)
+    results = xgb.cv(
+        dtrain=dtrain,
+        params=params,
+        nfold=5,
+        num_boost_round=NUM_BOOST_ROUND,
+        early_stopping_rounds=EARLY_STOPPING_ROUNDS,
+        metrics="auc",
+        as_pandas=True,
+        seed=int(params.get(XGBParams.seed, 0)),
+    )
+    auc_series = results[_XGB_CV_AUC]
+    if auc_series.isna().all():
+        return HyperoptObjectiveResult(
+            loss=0.0,
+            status=STATUS_OK,
+            n_estimators=1,
+            auc=0.0,
+        ).model_dump()
+    auc = float(auc_series.max())
+    n_estimators = int(auc_series.idxmax()) + 1
+    return HyperoptObjectiveResult(
+        loss=-1 * auc,
+        status=STATUS_OK,
+        n_estimators=n_estimators,
+        auc=auc,
+    ).model_dump()
+
+
+def _sklearn_params(best: dict, seed: int, n_estimators: int) -> XGBParams:
+    return XGBParams(
+        objective=OBJECTIVE,
+        alpha=int(best[XGBParams.alpha]),
+        gamma=float(best[XGBParams.gamma]),
+        reg_lambda=float(best[XGBParams.reg_lambda]),
+        colsample_bytree=float(best[XGBParams.colsample_bytree]),
+        min_child_weight=int(best[XGBParams.min_child_weight]),
+        max_depth=int(best[XGBParams.max_depth]),
+        learning_rate=float(best[XGBParams.learning_rate]),
+        n_estimators=int(n_estimators),
+        random_state=int(seed),
+        seed=int(seed),
+        eval_metric="auc",
+        tree_method=_TREE_METHOD,
+    )
+
+
+def default_xgb_params(seed: int, n_estimators: int = DEFAULT_N_ESTIMATORS) -> XGBParams:
+    """Fixed booster recipe used when ``max_evals=0`` (no TPE / k-fold CV)."""
+    return XGBParams(
+        objective=OBJECTIVE,
+        alpha=0,
+        gamma=0.0,
+        reg_lambda=1.0,
+        colsample_bytree=1.0,
+        min_child_weight=1,
+        max_depth=6,
+        learning_rate=0.3,
+        n_estimators=int(n_estimators),
+        random_state=int(seed),
+        seed=int(seed),
+        eval_metric="auc",
+        tree_method=_TREE_METHOD,
+    )
+
+
+def train_cross_validation_model(
+    dtrain: xgb.DMatrix, seed: int, max_evals: int = HYPEROPT_EVALS
+) -> HyperoptResult:
+    """TPE search on train folds. Bounds are sized for small n (hundreds of compounds)."""
+    logger.info("Hyperparameter optimisation")
+    space = {
+        XGBParams.objective: OBJECTIVE,
+        XGBParams.eval_metric: "auc",
+        HyperoptInjected.dtrain: dtrain,
+        XGBParams.alpha: hp.quniform(XGBParams.alpha, 0, 10, 1),
+        XGBParams.gamma: hp.uniform(XGBParams.gamma, 0, 5),
+        XGBParams.reg_lambda: hp.uniform(XGBParams.reg_lambda, 0.1, 10),
+        XGBParams.colsample_bytree: hp.uniform(XGBParams.colsample_bytree, 0.5, 1),
+        XGBParams.min_child_weight: hp.quniform(XGBParams.min_child_weight, 0, 10, 1),
+        XGBParams.max_depth: hp.uniformint(XGBParams.max_depth, 3, 18),
+        XGBParams.learning_rate: hp.uniform(XGBParams.learning_rate, 0.01, 0.2),
+        XGBParams.seed: seed,
+    }
+    trials = Trials()
+    best = fmin(
+        fn=hyperparameterisation,
+        space=space,
+        algo=tpe.suggest,
+        max_evals=max_evals,
+        trials=trials,
+        rstate=np.random.default_rng(seed),
+    )
+    best = _int_params(best)
+    trial_result = HyperoptObjectiveResult.model_validate(trials.best_trial["result"])
+    params = _sklearn_params(best, seed, trial_result.n_estimators)
+    return HyperoptResult(
+        params=params,
+        cv_auc=trial_result.auc,
+        n_estimators=trial_result.n_estimators,
+    )
+
+
+def _classifier_kwargs(params: XGBParams, *, early_stopping: bool) -> dict:
+    dumped = params.model_dump()
+    if early_stopping:
+        dumped["early_stopping_rounds"] = EARLY_STOPPING_ROUNDS
+    return dumped
+
+
+def _fit_fingerprint_model(
+    features: pd.DataFrame,
+    y: pd.Series,
+    train_idx: list[int],
+    test_idx: list[int],
+    params: XGBParams,
+    *,
+    fit_idx: list[int] | None = None,
+    val_idx: list[int] | None = None,
+    y_test: pd.Series | None = None,
+) -> tuple[XGBClassifier, EvalMetrics, int]:
+    early_stop = fit_idx is not None and val_idx is not None
+    xgb_clf = XGBClassifier(**_classifier_kwargs(params, early_stopping=early_stop))
+    if early_stop:
+        xgb_clf.fit(
+            features.iloc[fit_idx],
+            y.iloc[fit_idx],
+            eval_set=[(features.iloc[val_idx], y.iloc[val_idx])],
+            verbose=False,
+        )
+        n_estimators = int(getattr(xgb_clf, "best_iteration", params.n_estimators - 1)) + 1
+    else:
+        xgb_clf.fit(features.iloc[train_idx], y.iloc[train_idx])
+        n_estimators = int(params.n_estimators)
+    y_eval = y if y_test is None else y_test
+    y_pred = xgb_clf.predict(features.iloc[test_idx])
+    y_proba = xgb_clf.predict_proba(features.iloc[test_idx])[:, 1]
+    test_metrics = compute_test_metrics(y_eval.iloc[test_idx], y_pred, y_proba)
+    final = params.model_copy(update={XGBParams.n_estimators: n_estimators})
+    saved = XGBClassifier(**_classifier_kwargs(final, early_stopping=False))
+    saved.fit(features, y)
+    return saved, test_metrics, n_estimators
+
+
+def train_xgb_classifier(
+    df: pd.DataFrame,
+    outdir: str | Path,
+    split: str = "random",
+    seed: int = 42,
+    test_size: float = 0.2,
+    force: bool = False,
+    fp_size: int = DEFAULT_FP_SIZE,
+    max_evals: int = HYPEROPT_EVALS,
+    fingerprints: list[str] | None = None,
+    yscramble: bool = False,
+) -> XGBTrainResult:
+    """Train an XGBoost fingerprint classifier with checkpointed intermediate results.
+
+    ``df`` must contain SMILES and LABEL (0/1) columns.
+    ``outdir`` is the parent runs directory; artifacts go in
+    ``{outdir}/{arch}_{split}[_hpo][_yscramble]/seed_{seed}/``. ``max_evals=0`` skips TPE and k-fold
+    CV (fixed params + inner-val early stopping). ``max_evals>=1`` keeps the
+    CV-AUC selector. Every fingerprint is scored on the frozen test split.
+    ``yscramble=True`` permutes train labels only; test labels stay real.
+    """
+    if yscramble and max_evals > 0:
+        raise ValueError("Y-scramble uses the fixed recipe; do not combine with HPO")
+    parent = Path(outdir)
+    skip_hyperopt = max_evals <= 0
+    outdir = resolve_run_dir(
+        parent,
+        ARCHITECTURE,
+        split,
+        seed=seed,
+        hpo=not skip_hyperopt,
+        yscramble=yscramble,
+    )
+    prepared = prepare_training_run(
+        df,
+        outdir,
+        split=split,
+        seed=seed,
+        test_size=test_size,
+        force=force,
+    )
+    ckpt = prepared.ckpt
+    available = get_fingerprint_generators(fp_size=fp_size)
+    selected = list(available) if fingerprints is None else list(fingerprints)
+    unknown = [name for name in selected if name not in available]
+    if unknown:
+        raise ValueError(
+            f"Unknown fingerprint(s) {unknown}. Supported: {sorted(available)}"
+        )
+
+    expected = RunConfig(
+        input_hash=prepared.input_hash,
+        split=split,
+        seed=seed,
+        test_size=test_size,
+        fp_size=fp_size,
+        max_evals=max_evals,
+        fingerprints=selected,
+        architecture=ARCHITECTURE,
+        cleaned_hash=prepared.cleaned_hash,
+        yscramble=True if yscramble else None,
+    )
+
+    if ckpt.run_complete(prepared.stored, expected):
+        logger.info(f"Reusing completed run in {ckpt.outdir}")
+        classifier = XGBFingerprintClassifier.load(ckpt.outdir)
+        report = TrainingReport.model_validate(ckpt.load_json(ckpt.report_json_path))
+        return XGBTrainResult(
+            model=classifier.model,
+            classifier=classifier,
+            report=report,
+            outdir=ckpt.outdir,
+        )
+
+    cleaned = prepared.cleaned
+    train_idx = prepared.train_idx
+    test_idx = prepared.test_idx
+    generators = {name: available[name] for name in selected}
+    y_true = cleaned[CleanedTrainingData.LABEL]
+    y = (
+        scramble_train_labels(y_true, train_idx, seed)
+        if yscramble
+        else y_true
+    )
+    if yscramble:
+        logger.info("Y-scramble: permuted train labels; test labels unchanged")
+    fingerprint_comparison: dict[str, FingerprintScore] = {}
+    stored = prepared.stored
+    fit_idx, val_idx = train_val_indices(train_idx, y, seed=seed)
+    skip_hyperopt = max_evals <= 0
+
+    for fp_name, generator in generators.items():
+        logger.info(f"Evaluating {fp_name}")
+        features = fingerprint_features_for_run(
+            ckpt=ckpt,
+            parent=parent,
+            fp_name=fp_name,
+            generator=generator,
+            cleaned=cleaned,
+            cleaned_hash=prepared.cleaned_hash,
+            fp_size=fp_size,
+            stored=stored,
+        )
+
+        if skip_hyperopt:
+            params = default_xgb_params(seed)
+            logger.info(f"Validating {fp_name} on held-out test split (no CV)")
+            xgb_clf, test_metrics, n_estimators = _fit_fingerprint_model(
+                features,
+                y,
+                train_idx,
+                test_idx,
+                params,
+                fit_idx=fit_idx,
+                val_idx=val_idx,
+                y_test=y_true,
+            )
+            params = params.model_copy(update={XGBParams.n_estimators: n_estimators})
+            logger.info(f"{fp_name}: test ROC-AUC={test_metrics.roc_auc:.4f}")
+            fingerprint_comparison[fp_name] = FingerprintScore(
+                cv_auc=None,
+                n_estimators=n_estimators,
+                params=params.model_dump(),
+                test_metrics=test_metrics,
+            )
+        else:
+            hp_path = ckpt.hyperopt_path(fp_name)
+            if ckpt.should_reuse(
+                hp_path,
+                stored,
+                {
+                    RunConfig.cleaned_hash: prepared.cleaned_hash,
+                    RunConfig.split: split,
+                    RunConfig.seed: seed,
+                    RunConfig.test_size: test_size,
+                    RunConfig.fp_size: fp_size,
+                    RunConfig.max_evals: max_evals,
+                },
+            ):
+                logger.info(f"Loading hyperopt results from {hp_path}")
+                hp_result = HyperoptResult.model_validate(ckpt.load_json(hp_path))
+            else:
+                dtrain = xgb.DMatrix(
+                    data=features.iloc[train_idx],
+                    label=y.iloc[train_idx],
+                )
+                hp_result = train_cross_validation_model(
+                    dtrain=dtrain, seed=seed, max_evals=max_evals
+                )
+                ckpt.save_json(hp_path, hp_result)
+            params = hp_result.params.model_copy(
+                update={XGBParams.n_estimators: int(hp_result.n_estimators)}
+            )
+            logger.info(f"Validating {fp_name} on held-out test split")
+            xgb_clf, test_metrics, n_estimators = _fit_fingerprint_model(
+                features, y, train_idx, test_idx, params, y_test=y_true
+            )
+            logger.info(
+                f"{fp_name}: CV AUC={hp_result.cv_auc:.4f} "
+                f"test ROC-AUC={test_metrics.roc_auc:.4f}"
+            )
+            fingerprint_comparison[fp_name] = FingerprintScore(
+                cv_auc=hp_result.cv_auc,
+                n_estimators=n_estimators,
+                params=params.model_dump(),
+                test_metrics=test_metrics,
+            )
+        metadata = ModelMeta(
+            architecture=ARCHITECTURE,
+            fingerprint=fp_name,
+            fp_size=fp_size,
+            params=to_jsonable(params.model_dump()),
+            n_estimators=int(fingerprint_comparison[fp_name].n_estimators),
+        )
+        ckpt.fingerprint_dir(fp_name).mkdir(parents=True, exist_ok=True)
+        xgb_clf.save_model(str(ckpt.fingerprint_model_path(fp_name)))
+        ckpt.save_json(ckpt.fingerprint_meta_path(fp_name), metadata)
+
+    if skip_hyperopt:
+        best_fingerprint = default_saved_fingerprint(selected)
+        logger.info(f"Default fingerprint artifact: {best_fingerprint}")
+    else:
+        comparison = pd.DataFrame(
+            {
+                name: {FingerprintScore.cv_auc: score.cv_auc}
+                for name, score in fingerprint_comparison.items()
+            }
+        ).T
+        best_fingerprint = comparison[FingerprintScore.cv_auc].idxmax()
+        best_cv = fingerprint_comparison[best_fingerprint].cv_auc
+        logger.info(f"Best fingerprint by CV AUC: {best_fingerprint} ({best_cv:.4f})")
+    best = fingerprint_comparison[best_fingerprint]
+    shutil.copy2(
+        ckpt.fingerprint_model_path(best_fingerprint),
+        ckpt.model_path,
+    )
+    shutil.copy2(
+        ckpt.fingerprint_meta_path(best_fingerprint),
+        ckpt.meta_path,
+    )
+
+    report = build_report(
+        split=split,
+        seed=seed,
+        test_size=test_size,
+        n_train=len(train_idx),
+        n_test=len(test_idx),
+        best_fingerprint=best_fingerprint,
+        fingerprint_comparison=fingerprint_comparison,
+        test_metrics=best.test_metrics,
+        architecture=ARCHITECTURE,
+        max_evals=max_evals if max_evals > 0 else None,
+        yscramble=yscramble,
+    )
+    write_report(report, ckpt.report_json_path, ckpt.report_md_path)
+    ckpt.save_config(expected)
+
+    classifier = XGBFingerprintClassifier.load(ckpt.outdir)
+    return XGBTrainResult(
+        model=classifier.model,
+        classifier=classifier,
+        report=report,
+        outdir=ckpt.outdir,
+    )

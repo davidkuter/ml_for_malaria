@@ -2,14 +2,13 @@
 requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
 
-
 [project]
 name = "ml-for-malaria"
-version = "0.1.0"
+version = "0.2.0"
 description = "ML applied for Malaria"
 readme = "README.md"
-requires-python = ">=3.11"
-license = { file = "MIT License" }
+requires-python = ">=3.12"
+license = { text = "MIT" }
 keywords = ["machine learning", "malaria", "haemozoin"]
 
 authors = [
@@ -26,20 +25,61 @@ dependencies = [
     "matplotlib",
     "numpy",
     "pandas",
+    "pyarrow",
     "rdkit>=2024.3.5",
     "shap",
     "scikit-learn",
-    "xgboost"
+    "xgboost",
+    "tabulate>=0.10.0",
+    "pandera>=0.32.1",
 ]
 
-[project.optional-dependencies]
+[dependency-groups]
 dev = [
-
-    "check-manifest",
+    "coverage",
     "pytest",
-    "ruff"
+    "ruff",
 ]
-test = ["coverage"]
+
+[tool.ruff]
+target-version = "py311"
+extend-exclude = ["pyproject.toml"]
 
 [tool.setuptools.packages.find]
-where = ["."]
+include = ["ml_for_malaria*"]
+
+[tool.uv]
+default-groups = ["dev"]
+# Repo lives on a Windows drive; WSL cannot hardlink from the Linux uv cache.
+link-mode = "copy"
+
+[project.optional-dependencies]
+dl = [
+    "chemprop>=2.1",
+    "torch",
+    "transformers",
+    "accelerate",
+    "lightning",
+]
+# Official OpenFF wheels on PyPI are yanked; install from GitHub (plus models from PyPI).
+nagl = [
+    "torch",
+    "openff-nagl",
+    "openff-nagl-models>=2025.9.0",
+    "openff-toolkit",
+    "openff-units",
+    "openff-utilities",
+    "cachetools",
+    "networkx>=2.5",
+    "packaging",
+    "pint>=0.24,<0.26",
+    "python-constraint2",
+    "xmltodict",
+    "tqdm",
+]
+
+[tool.uv.sources]
+openff-nagl = { git = "https://github.com/openforcefield/openff-nagl.git", tag = "v0.5.5" }
+openff-toolkit = { git = "https://github.com/openforcefield/openff-toolkit.git", tag = "0.19.0" }
+openff-units = { git = "https://github.com/openforcefield/openff-units.git", tag = "0.3.2" }
+openff-utilities = { git = "https://github.com/openforcefield/openff-utilities.git", tag = "v0.1.17" }
