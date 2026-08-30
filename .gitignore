@@ -51,8 +51,15 @@ cover/
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 .idea/
 
-# Data
-data/
+# Data (run artifacts stay local; keep the pfpkg comparison narrative)
+data/*
+!data/pfpkg/
+data/pfpkg/*
+!data/pfpkg/runs/
+data/pfpkg/runs/*
+!data/pfpkg/runs/pfpkg/
+data/pfpkg/runs/pfpkg/*
+!data/pfpkg/runs/pfpkg/model_comparison_report.md
 
 # Training run artifacts at repo root (not ml_for_malaria/runs)
 /runs/
