@@ -15,6 +15,7 @@ from rdkit.Chem.rdFingerprintGenerator import (
 from ml_for_malaria.schemas import CleanedTrainingData, FingerprintFeatures
 
 DEFAULT_FP_SIZE = 2048
+DEFAULT_FINGERPRINT = "Morgan2FeatBits"
 _MOL_PARSE_ERRORS = (TypeError, ValueError, RuntimeError, MolSanitizeException)
 
 
@@ -97,6 +98,11 @@ def get_fingerprint_generators(fp_size: int = DEFAULT_FP_SIZE) -> dict:
             atomInvariantsGenerator=GetMorganFeatureAtomInvGen(),
         ),
         "Morgan3Bits": GetMorganGenerator(radius=3, fpSize=fp_size),
+        "Morgan3FeatBits": GetMorganGenerator(
+            radius=3,
+            fpSize=fp_size,
+            atomInvariantsGenerator=GetMorganFeatureAtomInvGen(),
+        ),
         "RDKit": GetRDKitFPGenerator(fpSize=fp_size),
         "AtomPair": GetAtomPairGenerator(fpSize=fp_size),
     }
@@ -109,6 +115,13 @@ def get_fingerprint_generator(name: str, fp_size: int = DEFAULT_FP_SIZE):
         supported = ", ".join(sorted(generators))
         raise ValueError(f"Unknown fingerprint {name!r}. Supported: {supported}")
     return generators[name]
+
+
+def default_saved_fingerprint(selected: list[str]) -> str:
+    """Fingerprint copied to the run-dir default artifact when CV is not the selector."""
+    if DEFAULT_FINGERPRINT in selected:
+        return DEFAULT_FINGERPRINT
+    return selected[0]
 
 
 def _process_atom_pair_bits(

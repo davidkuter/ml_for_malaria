@@ -9,7 +9,11 @@ import numpy as np
 import pandas as pd
 from loguru import logger
 
-from ml_for_malaria.chemistry.charges import parse_charge_method, require_charge_backend
+from ml_for_malaria.chemistry.charges import (
+    charge_cache_path,
+    parse_charge_method,
+    require_charge_backend,
+)
 from ml_for_malaria.model.chemprop_classifier import (
     ARCHITECTURE,
     ChempropClassifier,
@@ -107,26 +111,37 @@ def _build_mpnn(featurizer, hidden_size: int, dropout: float, depth: int):
     return MPNN(mp, NormAggregation(), ffn)
 
 
-def _datapoints_for_indices(
+def _datapoints_for_index_groups(
     cleaned: pd.DataFrame,
-    indices: list[int],
+    groups: list[list[int]],
     charge_method: str | None,
     n_jobs: int,
-) -> tuple[list, list[int]]:
+    cache_path: str | Path | None = None,
+) -> list[tuple[list, list[int]]]:
     smiles_col = CleanedTrainingData.SMILES
     label_col = CleanedTrainingData.LABEL
-    subset = cleaned.iloc[list(indices)]
-    smiles = subset[smiles_col].tolist()
-    labels = subset[label_col].astype(float).tolist()
-    built = build_datapoints(smiles, labels, charge_method, n_jobs=n_jobs)
-    points = []
-    kept = []
-    for idx, point in zip(indices, built):
-        if point is None:
-            continue
-        points.append(point)
-        kept.append(idx)
-    return points, kept
+    flat = [idx for group in groups for idx in group]
+    subset = cleaned.iloc[list(flat)]
+    built = build_datapoints(
+        subset[smiles_col].tolist(),
+        subset[label_col].astype(float).tolist(),
+        charge_method,
+        n_jobs=n_jobs,
+        cache_path=cache_path,
+    )
+    results: list[tuple[list, list[int]]] = []
+    start = 0
+    for group in groups:
+        chunk = built[start : start + len(group)]
+        points = []
+        kept = []
+        for idx, point in zip(group, chunk):
+            if point is not None:
+                points.append(point)
+                kept.append(idx)
+        results.append((points, kept))
+        start += len(group)
+    return results
 
 
 def _predict_loader(model, loader) -> np.ndarray:
@@ -173,7 +188,8 @@ def train_chemprop_classifier(
     """Train a Chemprop D-MPNN on the shared clean/split protocol.
 
     ``outdir`` is the parent runs directory; artifacts go in
-    ``{outdir}/{arch}_{split}`` or ``{outdir}/{arch}_{split}_{charge}``.
+    ``{outdir}/{arch}_{split}[_charge]/seed_{seed}/`` when ``seed`` is passed through
+    ``resolve_run_dir``.
     ``n_jobs`` defaults to all cores for NAGL charges and 1 otherwise.
     """
     (
@@ -194,7 +210,13 @@ def train_chemprop_classifier(
         workers = -1
     else:
         workers = 1
-    outdir = resolve_run_dir(outdir, ARCHITECTURE, split, charge_method=charge_method)
+    parent = Path(outdir)
+    outdir = resolve_run_dir(
+        parent, ARCHITECTURE, split, charge_method=charge_method, seed=seed
+    )
+    cache_file = (
+        charge_cache_path(parent, charge_method) if charge_method is not None else None
+    )
     prepared = prepare_training_run(
         df,
         outdir,
@@ -235,14 +257,14 @@ def train_chemprop_classifier(
         f"n_jobs={workers})"
     )
     started = time.perf_counter()
-    train_points, train_kept = _datapoints_for_indices(
-        cleaned, fit_idx, charge_method, workers
-    )
-    val_points, val_kept = _datapoints_for_indices(
-        cleaned, val_idx, charge_method, workers
-    )
-    test_points, test_kept = _datapoints_for_indices(
-        cleaned, prepared.test_idx, charge_method, workers
+    (train_points, train_kept), (val_points, val_kept), (test_points, test_kept) = (
+        _datapoints_for_index_groups(
+            cleaned,
+            [fit_idx, val_idx, prepared.test_idx],
+            charge_method,
+            workers,
+            cache_file,
+        )
     )
     logger.info(
         f"Finished Chemprop graphs in {time.perf_counter() - started:.1f}s"

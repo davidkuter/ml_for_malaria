@@ -14,6 +14,10 @@ def load_classifier(outdir: str | Path, fingerprint: str | None = None):
         from ml_for_malaria.model.xgb_classifier import XGBFingerprintClassifier
 
         return XGBFingerprintClassifier.load(outdir, fingerprint=fingerprint)
+    if metadata.architecture == Architecture.RANDOM_FOREST:
+        from ml_for_malaria.model.rf_classifier import RFFingerprintClassifier
+
+        return RFFingerprintClassifier.load(outdir, fingerprint=fingerprint)
     if metadata.architecture == Architecture.CHEMPROP:
         from ml_for_malaria.model.chemprop_classifier import ChempropClassifier
 

@@ -13,7 +13,7 @@ from xgboost import XGBClassifier
 
 from ml_for_malaria.chemistry.featurization import (
     DEFAULT_FP_SIZE,
-    featurize_smiles,
+    default_saved_fingerprint,
     get_fingerprint_generators,
 )
 from ml_for_malaria.model.xgb_classifier import ARCHITECTURE, XGBFingerprintClassifier
@@ -32,11 +32,13 @@ from ml_for_malaria.schemas import (
     TrainingReport,
     XGBParams,
 )
-from ml_for_malaria.train.prepare import prepare_training_run
+from ml_for_malaria.train.fingerprint_features import fingerprint_features_for_run
+from ml_for_malaria.train.prepare import prepare_training_run, train_val_indices
 
 NUM_BOOST_ROUND = 1000
 EARLY_STOPPING_ROUNDS = 20
 HYPEROPT_EVALS = 100
+DEFAULT_N_ESTIMATORS = 200
 OBJECTIVE = "binary:logistic"
 _XGB_CV_AUC = "test-auc-mean"
 _INT_XGB_PARAMS = (
@@ -44,6 +46,7 @@ _INT_XGB_PARAMS = (
     XGBParams.max_depth,
     XGBParams.min_child_weight,
 )
+_TREE_METHOD = "hist"
 
 
 @dataclass
@@ -108,6 +111,26 @@ def _sklearn_params(best: dict, seed: int, n_estimators: int) -> XGBParams:
         random_state=int(seed),
         seed=int(seed),
         eval_metric="auc",
+        tree_method=_TREE_METHOD,
+    )
+
+
+def default_xgb_params(seed: int, n_estimators: int = DEFAULT_N_ESTIMATORS) -> XGBParams:
+    """Fixed booster recipe used when ``max_evals=0`` (no TPE / k-fold CV)."""
+    return XGBParams(
+        objective=OBJECTIVE,
+        alpha=0,
+        gamma=0.0,
+        reg_lambda=1.0,
+        colsample_bytree=1.0,
+        min_child_weight=1,
+        max_depth=6,
+        learning_rate=0.3,
+        n_estimators=int(n_estimators),
+        random_state=int(seed),
+        seed=int(seed),
+        eval_metric="auc",
+        tree_method=_TREE_METHOD,
     )
 
 
@@ -148,20 +171,43 @@ def train_cross_validation_model(
     )
 
 
+def _classifier_kwargs(params: XGBParams, *, early_stopping: bool) -> dict:
+    dumped = params.model_dump()
+    if early_stopping:
+        dumped["early_stopping_rounds"] = EARLY_STOPPING_ROUNDS
+    return dumped
+
+
 def _fit_fingerprint_model(
     features: pd.DataFrame,
     y: pd.Series,
     train_idx: list[int],
     test_idx: list[int],
     params: XGBParams,
-) -> tuple[XGBClassifier, EvalMetrics]:
-    xgb_clf = XGBClassifier(**params.model_dump())
-    xgb_clf.fit(features.iloc[train_idx], y.iloc[train_idx])
+    *,
+    fit_idx: list[int] | None = None,
+    val_idx: list[int] | None = None,
+) -> tuple[XGBClassifier, EvalMetrics, int]:
+    early_stop = fit_idx is not None and val_idx is not None
+    xgb_clf = XGBClassifier(**_classifier_kwargs(params, early_stopping=early_stop))
+    if early_stop:
+        xgb_clf.fit(
+            features.iloc[fit_idx],
+            y.iloc[fit_idx],
+            eval_set=[(features.iloc[val_idx], y.iloc[val_idx])],
+            verbose=False,
+        )
+        n_estimators = int(getattr(xgb_clf, "best_iteration", params.n_estimators - 1)) + 1
+    else:
+        xgb_clf.fit(features.iloc[train_idx], y.iloc[train_idx])
+        n_estimators = int(params.n_estimators)
     y_pred = xgb_clf.predict(features.iloc[test_idx])
     y_proba = xgb_clf.predict_proba(features.iloc[test_idx])[:, 1]
     test_metrics = compute_test_metrics(y.iloc[test_idx], y_pred, y_proba)
-    xgb_clf.fit(features, y)
-    return xgb_clf, test_metrics
+    final = params.model_copy(update={XGBParams.n_estimators: n_estimators})
+    saved = XGBClassifier(**_classifier_kwargs(final, early_stopping=False))
+    saved.fit(features, y)
+    return saved, test_metrics, n_estimators
 
 
 def train_xgb_classifier(
@@ -179,11 +225,12 @@ def train_xgb_classifier(
 
     ``df`` must contain SMILES and LABEL (0/1) columns.
     ``outdir`` is the parent runs directory; artifacts go in
-    ``{outdir}/{arch}_{split}/``. CV AUC selects the default ``model.ubj``;
-    every fingerprint is scored on the frozen test split and saved under
-    ``models/{fingerprint}/``.
+    ``{outdir}/{arch}_{split}/seed_{seed}/``. ``max_evals=0`` skips TPE and k-fold
+    CV (fixed params + inner-val early stopping). ``max_evals>=1`` keeps the
+    CV-AUC selector. Every fingerprint is scored on the frozen test split.
     """
-    outdir = resolve_run_dir(outdir, ARCHITECTURE, split)
+    parent = Path(outdir)
+    outdir = resolve_run_dir(parent, ARCHITECTURE, split, seed=seed)
     prepared = prepare_training_run(
         df,
         outdir,
@@ -231,97 +278,109 @@ def train_xgb_classifier(
     y = cleaned[CleanedTrainingData.LABEL]
     fingerprint_comparison: dict[str, FingerprintScore] = {}
     stored = prepared.stored
+    fit_idx, val_idx = train_val_indices(train_idx, y, seed=seed)
+    skip_hyperopt = max_evals <= 0
 
     for fp_name, generator in generators.items():
         logger.info(f"Evaluating {fp_name}")
-        feat_path = ckpt.features_path(fp_name)
-        if ckpt.should_reuse(
-            feat_path,
-            stored,
-            {
-                RunConfig.cleaned_hash: prepared.cleaned_hash,
-                RunConfig.fp_size: fp_size,
-            },
-        ):
-            features = ckpt.load_features(fp_name)
-        else:
-            features = featurize_smiles(
-                smiles=cleaned[CleanedTrainingData.SMILES],
-                fp_generator=generator,
-                sanitize=False,
+        features = fingerprint_features_for_run(
+            ckpt=ckpt,
+            parent=parent,
+            fp_name=fp_name,
+            generator=generator,
+            cleaned=cleaned,
+            cleaned_hash=prepared.cleaned_hash,
+            fp_size=fp_size,
+            stored=stored,
+        )
+
+        if skip_hyperopt:
+            params = default_xgb_params(seed)
+            logger.info(f"Validating {fp_name} on held-out test split (no CV)")
+            xgb_clf, test_metrics, n_estimators = _fit_fingerprint_model(
+                features,
+                y,
+                train_idx,
+                test_idx,
+                params,
+                fit_idx=fit_idx,
+                val_idx=val_idx,
             )
-            if len(features) != len(cleaned):
-                missing = len(cleaned) - len(features)
-                raise RuntimeError(
-                    f"{fp_name}: {missing} SMILES failed featurization after sanitization"
+            params = params.model_copy(update={XGBParams.n_estimators: n_estimators})
+            logger.info(f"{fp_name}: test ROC-AUC={test_metrics.roc_auc:.4f}")
+            fingerprint_comparison[fp_name] = FingerprintScore(
+                cv_auc=None,
+                n_estimators=n_estimators,
+                params=params.model_dump(),
+                test_metrics=test_metrics,
+            )
+        else:
+            hp_path = ckpt.hyperopt_path(fp_name)
+            if ckpt.should_reuse(
+                hp_path,
+                stored,
+                {
+                    RunConfig.cleaned_hash: prepared.cleaned_hash,
+                    RunConfig.split: split,
+                    RunConfig.seed: seed,
+                    RunConfig.test_size: test_size,
+                    RunConfig.fp_size: fp_size,
+                    RunConfig.max_evals: max_evals,
+                },
+            ):
+                logger.info(f"Loading hyperopt results from {hp_path}")
+                hp_result = HyperoptResult.model_validate(ckpt.load_json(hp_path))
+            else:
+                dtrain = xgb.DMatrix(
+                    data=features.iloc[train_idx],
+                    label=y.iloc[train_idx],
                 )
-            features = features.reset_index(drop=True)
-            ckpt.save_features(fp_name, features)
-
-        features = features.reset_index(drop=True)
-
-        hp_path = ckpt.hyperopt_path(fp_name)
-        if ckpt.should_reuse(
-            hp_path,
-            stored,
-            {
-                RunConfig.cleaned_hash: prepared.cleaned_hash,
-                RunConfig.split: split,
-                RunConfig.seed: seed,
-                RunConfig.test_size: test_size,
-                RunConfig.fp_size: fp_size,
-                RunConfig.max_evals: max_evals,
-            },
-        ):
-            logger.info(f"Loading hyperopt results from {hp_path}")
-            hp_result = HyperoptResult.model_validate(ckpt.load_json(hp_path))
-        else:
-            dtrain = xgb.DMatrix(
-                data=features.iloc[train_idx],
-                label=y.iloc[train_idx],
+                hp_result = train_cross_validation_model(
+                    dtrain=dtrain, seed=seed, max_evals=max_evals
+                )
+                ckpt.save_json(hp_path, hp_result)
+            params = hp_result.params.model_copy(
+                update={XGBParams.n_estimators: int(hp_result.n_estimators)}
             )
-            hp_result = train_cross_validation_model(
-                dtrain=dtrain, seed=seed, max_evals=max_evals
+            logger.info(f"Validating {fp_name} on held-out test split")
+            xgb_clf, test_metrics, n_estimators = _fit_fingerprint_model(
+                features, y, train_idx, test_idx, params
             )
-            ckpt.save_json(hp_path, hp_result)
-
-        params = hp_result.params.model_copy(
-            update={XGBParams.n_estimators: int(hp_result.n_estimators)}
-        )
-        logger.info(f"Validating {fp_name} on held-out test split")
-        xgb_clf, test_metrics = _fit_fingerprint_model(
-            features, y, train_idx, test_idx, params
-        )
-        logger.info(
-            f"{fp_name}: CV AUC={hp_result.cv_auc:.4f} "
-            f"test ROC-AUC={test_metrics.roc_auc:.4f}"
-        )
-        fingerprint_comparison[fp_name] = FingerprintScore(
-            cv_auc=hp_result.cv_auc,
-            n_estimators=hp_result.n_estimators,
-            params=params.model_dump(),
-            test_metrics=test_metrics,
-        )
+            logger.info(
+                f"{fp_name}: CV AUC={hp_result.cv_auc:.4f} "
+                f"test ROC-AUC={test_metrics.roc_auc:.4f}"
+            )
+            fingerprint_comparison[fp_name] = FingerprintScore(
+                cv_auc=hp_result.cv_auc,
+                n_estimators=n_estimators,
+                params=params.model_dump(),
+                test_metrics=test_metrics,
+            )
         metadata = ModelMeta(
             architecture=ARCHITECTURE,
             fingerprint=fp_name,
             fp_size=fp_size,
             params=to_jsonable(params.model_dump()),
-            n_estimators=int(hp_result.n_estimators),
+            n_estimators=int(fingerprint_comparison[fp_name].n_estimators),
         )
         ckpt.fingerprint_dir(fp_name).mkdir(parents=True, exist_ok=True)
         xgb_clf.save_model(str(ckpt.fingerprint_model_path(fp_name)))
         ckpt.save_json(ckpt.fingerprint_meta_path(fp_name), metadata)
 
-    comparison = pd.DataFrame(
-        {
-            name: {FingerprintScore.cv_auc: score.cv_auc}
-            for name, score in fingerprint_comparison.items()
-        }
-    ).T
-    best_fingerprint = comparison[FingerprintScore.cv_auc].idxmax()
+    if skip_hyperopt:
+        best_fingerprint = default_saved_fingerprint(selected)
+        logger.info(f"Default fingerprint artifact: {best_fingerprint}")
+    else:
+        comparison = pd.DataFrame(
+            {
+                name: {FingerprintScore.cv_auc: score.cv_auc}
+                for name, score in fingerprint_comparison.items()
+            }
+        ).T
+        best_fingerprint = comparison[FingerprintScore.cv_auc].idxmax()
+        best_cv = fingerprint_comparison[best_fingerprint].cv_auc
+        logger.info(f"Best fingerprint by CV AUC: {best_fingerprint} ({best_cv:.4f})")
     best = fingerprint_comparison[best_fingerprint]
-    logger.info(f"Best fingerprint by CV AUC: {best_fingerprint} ({best.cv_auc:.4f})")
     shutil.copy2(
         ckpt.fingerprint_model_path(best_fingerprint),
         ckpt.model_path,

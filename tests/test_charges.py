@@ -7,6 +7,8 @@ from rdkit import Chem
 from ml_for_malaria.chemistry import (
     ChargeAssignmentError,
     atom_charges,
+    charge_cache_path,
+    charges_for_smiles,
     parse_charge_method,
     require_charge_backend,
 )
@@ -55,3 +57,26 @@ def test_nagl_charges_or_skip():
     assert np.isfinite(charges).all()
     again = atom_charges(Chem.MolFromSmiles("CC"), ChargeMethod.NAGL)
     assert again.shape == (Chem.MolFromSmiles("CC").GetNumAtoms(), 1)
+
+
+def test_gasteiger_charge_cache_roundtrip(tmp_path, monkeypatch):
+    calls = {"n": 0}
+    real_assign = atom_charges
+
+    def counting_assign(mol, method):
+        calls["n"] += 1
+        return real_assign(mol, method)
+
+    monkeypatch.setattr(
+        "ml_for_malaria.chemistry.charges.atom_charges", counting_assign
+    )
+    cache = charge_cache_path(tmp_path, ChargeMethod.GASTEIGER)
+    smiles = ["CCO", "c1ccccc1"]
+    first = charges_for_smiles(smiles, ChargeMethod.GASTEIGER, cache)
+    assert cache.exists()
+    assert calls["n"] == 2
+    assert set(first) == set(smiles)
+    second = charges_for_smiles(smiles, ChargeMethod.GASTEIGER, cache)
+    assert calls["n"] == 2
+    for smi in smiles:
+        np.testing.assert_allclose(first[smi], second[smi])

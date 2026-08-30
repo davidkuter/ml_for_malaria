@@ -31,8 +31,19 @@ class JsonModel(BaseModel):
 
 class Architecture(StrEnum):
     XGBOOST = "xgboost"
+    RANDOM_FOREST = "random_forest"
     CHEMPROP = "chemprop"
     CHEMBERTA = "chemberta"
+
+
+class SklearnClassWeight(StrEnum):
+    BALANCED = "balanced"
+    BALANCED_SUBSAMPLE = "balanced_subsample"
+
+
+class RFMaxFeatures(StrEnum):
+    SQRT = "sqrt"
+    LOG2 = "log2"
 
 
 class ChargeMethod(StrEnum):
@@ -83,6 +94,17 @@ class XGBParams(JsonModel):
     random_state: int
     seed: int
     eval_metric: str
+    tree_method: str = "hist"
+
+
+class RandomForestParams(JsonModel):
+    n_estimators: int
+    max_depth: int | None = None
+    min_samples_leaf: int = 1
+    max_features: str = RFMaxFeatures.SQRT
+    class_weight: str | None = SklearnClassWeight.BALANCED
+    n_jobs: int = 1
+    random_state: int
 
 
 class HyperoptInjected(JsonModel):
@@ -103,7 +125,7 @@ class HyperoptResult(JsonModel):
 
 
 class FingerprintScore(JsonModel):
-    cv_auc: float
+    cv_auc: float | None = None
     n_estimators: int
     params: dict[str, Any] = Field(default_factory=dict)
     test_metrics: EvalMetrics | None = None
@@ -176,9 +198,38 @@ class ComparisonRow(JsonModel):
     outdir: str
 
 
+class ComparisonAggregate(JsonModel):
+    architecture: str
+    identifier: str
+    split: str
+    charge_method: str | None = None
+    n_seeds: int
+    n_train: float
+    n_test: float
+    roc_auc_mean: float
+    roc_auc_std: float | None = None
+    pr_auc_mean: float
+    pr_auc_std: float | None = None
+    accuracy_mean: float
+    accuracy_std: float | None = None
+    f1_0_mean: float
+    f1_0_std: float | None = None
+    f1_1_mean: float
+    f1_1_std: float | None = None
+    weighted_f1_mean: float
+    weighted_f1_std: float | None = None
+
+
 class ComparisonReport(JsonModel):
     rows: list[ComparisonRow]
+    aggregates: list[ComparisonAggregate] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+
+
+def empty_frame(schema: type[pa.DataFrameModel]) -> pd.DataFrame:
+    """Schema columns with no rows. Callers check ``df.empty``, not ``None``."""
+    columns = list(schema.to_schema().columns)
+    return schema.validate(pd.DataFrame(columns=columns))
 
 
 class CleanedTrainingData(pa.DataFrameModel):
@@ -250,11 +301,22 @@ class ShapValues(pa.DataFrameModel):
         return df.shape[1] == 1 and bool(pd.api.types.is_numeric_dtype(df.iloc[:, 0]))
 
 
+class AtomChargeCache(pa.DataFrameModel):
+    """SMILES-keyed partial charges shared across Chemprop seeds."""
+
+    SMILES: Series[str] = pa.Field(unique=True, nullable=False)
+    charges: Series[object] = pa.Field(nullable=False)
+
+    class Config:
+        coerce = True
+        strict = "filter"
+
+
 class FingerprintComparison(pa.DataFrameModel):
     """Per-fingerprint CV and held-out test results used in the training report."""
 
     fingerprint: Series[str]
-    cv_auc: Series[float]
+    cv_auc: Series[float] = pa.Field(nullable=True)
     n_estimators: Series[int]
     roc_auc: Series[float]
     pr_auc: Series[float]
@@ -289,6 +351,7 @@ class MetricsTable(pa.DataFrameModel):
 class ComparisonTable(pa.DataFrameModel):
     architecture: Series[str]
     identifier: Series[str]
+    split: Series[str]
     n_train: Series[int]
     n_test: Series[int]
     roc_auc: Series[float]

@@ -154,10 +154,10 @@ def train_smiles_transformer(
     """Fine-tune a SMILES transformer on the shared clean/split protocol.
 
     ``outdir`` is the parent runs directory; artifacts go in
-    ``{outdir}/{arch}_{split}/``.
+    ``{outdir}/{arch}_{split}/seed_{seed}/``.
     """
     _, _, Trainer, _, EarlyStoppingCallback = _require_trainer()
-    outdir = resolve_run_dir(outdir, ARCHITECTURE, split)
+    outdir = resolve_run_dir(outdir, ARCHITECTURE, split, seed=seed)
     prepared = prepare_training_run(
         df,
         outdir,

@@ -35,6 +35,7 @@ def test_chemprop_smoke_with_gasteiger(tmp_path: Path):
         Architecture.CHEMPROP,
         "random",
         charge_method=ChargeMethod.GASTEIGER,
+        seed=0,
     )
     assert result.outdir == run
     assert result.report.architecture == Architecture.CHEMPROP
@@ -67,7 +68,7 @@ def test_chemprop_smoke_without_charges(tmp_path: Path):
         accelerator="cpu",
         force=True,
     )
-    run = resolve_run_dir(tmp_path, Architecture.CHEMPROP, "random")
+    run = resolve_run_dir(tmp_path, Architecture.CHEMPROP, "random", seed=0)
     assert result.outdir == run
     assert result.report.charge_method is None
     preds = result.classifier.predict(["CCO"])
@@ -93,7 +94,7 @@ def test_chemberta_tiny_test_does_not_download(tmp_path: Path):
         accelerator="cpu",
         force=True,
     )
-    run = resolve_run_dir(tmp_path, Architecture.CHEMBERTA, "random")
+    run = resolve_run_dir(tmp_path, Architecture.CHEMBERTA, "random", seed=0)
     assert result.outdir == run
     assert result.report.architecture == Architecture.CHEMBERTA
     assert result.report.pretrained_name == TINY_TEST_NAME

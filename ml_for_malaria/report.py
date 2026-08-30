@@ -18,6 +18,7 @@ from ml_for_malaria.runs.checkpoints import RunCheckpointer
 from ml_for_malaria.schemas import (
     Architecture,
     ClassLabel,
+    ComparisonAggregate,
     ComparisonReport,
     ComparisonRow,
     ComparisonTable,
@@ -260,9 +261,10 @@ def _fingerprint_frame(comparison: dict[str, FingerprintScore]) -> pd.DataFrame:
     frame[FingerprintComparison.n_estimators] = frame[
         FingerprintComparison.n_estimators
     ].astype("Int64")
-    return frame.sort_values(FingerprintComparison.cv_auc, ascending=False).reset_index(
-        drop=True
-    )
+    sort_key = FingerprintComparison.cv_auc
+    if frame[sort_key].isna().all():
+        sort_key = FingerprintComparison.roc_auc
+    return frame.sort_values(sort_key, ascending=False).reset_index(drop=True)
 
 
 def _fingerprint_detail_sections(comparison: dict[str, FingerprintScore]) -> list[str]:
@@ -334,7 +336,7 @@ def write_report(report: TrainingReport, json_path: Path, md_path: Path) -> None
 def _run_identifier(
     report: TrainingReport, meta: ModelMeta | None, charge_method: str | None
 ) -> str:
-    if report.architecture == Architecture.XGBOOST:
+    if report.architecture in (Architecture.XGBOOST, Architecture.RANDOM_FOREST):
         return report.best_fingerprint or _NONE_IDENTIFIER
     if report.architecture == Architecture.CHEMBERTA:
         name = report.pretrained_name
@@ -380,12 +382,7 @@ def _mismatch_warnings(rows: list[ComparisonRow]) -> list[str]:
         return []
     frame = pd.DataFrame([row.model_dump() for row in rows])
     warnings: list[str] = []
-    for column in (
-        ComparisonRow.split,
-        ComparisonRow.seed,
-        ComparisonRow.test_size,
-        ComparisonRow.cleaned_hash,
-    ):
+    for column in (ComparisonRow.test_size, ComparisonRow.cleaned_hash):
         values = frame[column]
         unique = values.dropna().unique()
         if len(unique) > 1:
@@ -394,10 +391,109 @@ def _mismatch_warnings(rows: list[ComparisonRow]) -> list[str]:
     return warnings
 
 
-def _comparison_frame(rows: list[ComparisonRow]) -> pd.DataFrame:
+def _sample_std(values: pd.Series) -> float | None:
+    if len(values) < 2:
+        return None
+    return float(values.std(ddof=1))
+
+
+def _format_mean_std(mean: float, std: float | None) -> str:
+    if std is None:
+        return f"{mean:.4f}"
+    return f"{mean:.4f} ± {std:.4f}"
+
+
+def _aggregate_rows(rows: list[ComparisonRow]) -> list[ComparisonAggregate]:
+    if not rows:
+        return []
+    frame = pd.DataFrame([row.model_dump() for row in rows])
+    group_cols = [
+        ComparisonRow.architecture,
+        ComparisonRow.identifier,
+        ComparisonRow.split,
+        ComparisonRow.charge_method,
+    ]
+    aggregates: list[ComparisonAggregate] = []
+    grouped = frame.groupby(group_cols, dropna=False, sort=True)
+    for keys, group in grouped:
+        architecture, identifier, split, charge_method = keys
+        if pd.isna(charge_method):
+            charge_method = None
+        aggregates.append(
+            ComparisonAggregate(
+                architecture=architecture,
+                identifier=identifier,
+                split=split,
+                charge_method=charge_method,
+                n_seeds=int(group[ComparisonRow.seed].nunique()),
+                n_train=float(group[ComparisonRow.n_train].mean()),
+                n_test=float(group[ComparisonRow.n_test].mean()),
+                roc_auc_mean=float(group[ComparisonRow.roc_auc].mean()),
+                roc_auc_std=_sample_std(group[ComparisonRow.roc_auc]),
+                pr_auc_mean=float(group[ComparisonRow.pr_auc].mean()),
+                pr_auc_std=_sample_std(group[ComparisonRow.pr_auc]),
+                accuracy_mean=float(group[ComparisonRow.accuracy].mean()),
+                accuracy_std=_sample_std(group[ComparisonRow.accuracy]),
+                f1_0_mean=float(group[ComparisonRow.f1_0].mean()),
+                f1_0_std=_sample_std(group[ComparisonRow.f1_0]),
+                f1_1_mean=float(group[ComparisonRow.f1_1].mean()),
+                f1_1_std=_sample_std(group[ComparisonRow.f1_1]),
+                weighted_f1_mean=float(group[ComparisonRow.weighted_f1].mean()),
+                weighted_f1_std=_sample_std(group[ComparisonRow.weighted_f1]),
+            )
+        )
+    return aggregates
+
+
+def _aggregate_frame(aggregates: list[ComparisonAggregate]) -> pd.DataFrame:
     columns = [
         ComparisonTable.architecture,
         ComparisonTable.identifier,
+        ComparisonTable.split,
+        ComparisonAggregate.n_seeds,
+        ComparisonTable.n_train,
+        ComparisonTable.n_test,
+        ComparisonTable.roc_auc,
+        ComparisonTable.pr_auc,
+        ComparisonTable.accuracy,
+        ComparisonTable.f1_0,
+        ComparisonTable.f1_1,
+        ComparisonTable.weighted_f1,
+    ]
+    if not aggregates:
+        return pd.DataFrame(columns=columns)
+    rows = [
+        {
+            ComparisonTable.architecture: item.architecture,
+            ComparisonTable.identifier: item.identifier,
+            ComparisonTable.split: item.split,
+            ComparisonAggregate.n_seeds: item.n_seeds,
+            ComparisonTable.n_train: item.n_train,
+            ComparisonTable.n_test: item.n_test,
+            ComparisonTable.roc_auc: _format_mean_std(
+                item.roc_auc_mean, item.roc_auc_std
+            ),
+            ComparisonTable.pr_auc: _format_mean_std(item.pr_auc_mean, item.pr_auc_std),
+            ComparisonTable.accuracy: _format_mean_std(
+                item.accuracy_mean, item.accuracy_std
+            ),
+            ComparisonTable.f1_0: _format_mean_std(item.f1_0_mean, item.f1_0_std),
+            ComparisonTable.f1_1: _format_mean_std(item.f1_1_mean, item.f1_1_std),
+            ComparisonTable.weighted_f1: _format_mean_std(
+                item.weighted_f1_mean, item.weighted_f1_std
+            ),
+        }
+        for item in aggregates
+    ]
+    return pd.DataFrame(rows, columns=columns)
+
+
+def _per_seed_frame(rows: list[ComparisonRow]) -> pd.DataFrame:
+    columns = [
+        ComparisonTable.architecture,
+        ComparisonTable.identifier,
+        ComparisonTable.split,
+        ComparisonRow.seed,
         ComparisonTable.n_train,
         ComparisonTable.n_test,
         ComparisonTable.roc_auc,
@@ -417,9 +513,13 @@ def comparison_to_markdown(report: ComparisonReport) -> str:
     sections = [
         "# Architecture comparison",
         "",
-        "## Test metrics",
+        "## Test metrics (mean ± std)",
         "",
-        _markdown_table(_comparison_frame(report.rows)),
+        _markdown_table(_aggregate_frame(report.aggregates), floatfmt=None),
+        "",
+        "## Per-seed runs",
+        "",
+        _markdown_table(_per_seed_frame(report.rows)),
         "",
     ]
     if report.warnings:
@@ -432,6 +532,47 @@ def comparison_to_markdown(report: ComparisonReport) -> str:
             ]
         )
     return "\n".join(sections)
+
+
+def _rows_for_run(
+    report: TrainingReport,
+    *,
+    charge_method: str | None,
+    cleaned_hash: str | None,
+    outdir: Path,
+    meta: ModelMeta | None,
+) -> list[ComparisonRow]:
+    if report.fingerprint_comparison:
+        rows: list[ComparisonRow] = []
+        for name, score in report.fingerprint_comparison.items():
+            if score.test_metrics is None:
+                continue
+            per_fp = report.model_copy(
+                update={
+                    TrainingReport.best_fingerprint: name,
+                    TrainingReport.test_metrics: score.test_metrics,
+                }
+            )
+            rows.append(
+                _metrics_row(
+                    per_fp,
+                    charge_method=charge_method,
+                    cleaned_hash=cleaned_hash,
+                    outdir=outdir,
+                    meta=meta,
+                )
+            )
+        if rows:
+            return rows
+    return [
+        _metrics_row(
+            report,
+            charge_method=charge_method,
+            cleaned_hash=cleaned_hash,
+            outdir=outdir,
+            meta=meta,
+        )
+    ]
 
 
 def write_comparison_report(
@@ -458,8 +599,8 @@ def write_comparison_report(
         if charge_method is None and meta is not None:
             charge_method = meta.charge_method
         cleaned_hash = config.cleaned_hash if config is not None else None
-        rows.append(
-            _metrics_row(
+        rows.extend(
+            _rows_for_run(
                 report,
                 charge_method=charge_method,
                 cleaned_hash=cleaned_hash,
@@ -467,7 +608,11 @@ def write_comparison_report(
                 meta=meta,
             )
         )
-    comparison = ComparisonReport(rows=rows, warnings=_mismatch_warnings(rows))
+    comparison = ComparisonReport(
+        rows=rows,
+        aggregates=_aggregate_rows(rows),
+        warnings=_mismatch_warnings(rows),
+    )
     out_path = Path(out_path)
     json_path = out_path.with_suffix(".json")
     md_path = out_path.with_suffix(".md")

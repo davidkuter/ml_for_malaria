@@ -75,6 +75,7 @@ nagl = [
     "pint>=0.24,<0.26",
     "python-constraint2",
     "xmltodict",
+    "tqdm",
 ]
 
 [tool.uv.sources]

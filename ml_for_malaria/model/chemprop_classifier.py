@@ -8,12 +8,14 @@ from loguru import logger
 
 from ml_for_malaria.chemistry.charges import (
     ChargeAssignmentError,
-    atom_charges,
+    charge_cache_path,
+    charges_for_smiles,
+    parse_charge_method,
     require_charge_backend,
 )
 from ml_for_malaria.model.predict import prepare_predict_smiles
 from ml_for_malaria.runs.checkpoints import RunCheckpointer
-from ml_for_malaria.schemas import Architecture, ModelMeta, Predictions
+from ml_for_malaria.schemas import Architecture, ChargeMethod, ModelMeta, Predictions
 
 ARCHITECTURE = Architecture.CHEMPROP
 _EXTRA_ATOM_FDIM = 1
@@ -78,7 +80,12 @@ def graph_batch_to_device(batch, device):
     return bmg, V_d, X_d
 
 
-def molecule_datapoint(smiles: str, y: float | None, charge_method: str | None):
+def molecule_datapoint(
+    smiles: str,
+    y: float | None,
+    charge_method: str | None,
+    charges: np.ndarray | None = None,
+):
     """Build a Chemprop datapoint; charges are taken from the same mol Chemprop featurizes."""
     MoleculeDatapoint, *_ = _require_chemprop()
     kwargs: dict = {}
@@ -91,11 +98,14 @@ def molecule_datapoint(smiles: str, y: float | None, charge_method: str | None):
         return None
     if charge_method is None:
         return point
-    try:
-        charges = atom_charges(point.mol, charge_method)
-    except ChargeAssignmentError:
-        logger.warning(f"Dropping {smiles!r}: charge assignment failed")
-        return None
+    if charges is None:
+        try:
+            from ml_for_malaria.chemistry.charges import atom_charges
+
+            charges = atom_charges(point.mol, charge_method)
+        except ChargeAssignmentError:
+            logger.warning(f"Dropping {smiles!r}: charge assignment failed")
+            return None
     expected = (point.mol.GetNumAtoms(), extra_atom_fdim(charge_method))
     if charges.shape != expected:
         logger.warning(
@@ -106,27 +116,68 @@ def molecule_datapoint(smiles: str, y: float | None, charge_method: str | None):
     return point
 
 
+def _nagl_progress(total: int, enabled: bool):
+    if not enabled or total <= 0:
+        return None
+    try:
+        from tqdm.auto import tqdm
+    except ImportError:
+        return None
+    return tqdm(total=total, desc="NAGL charges", unit="mol")
+
+
 def build_datapoints(
     smiles: list[str],
     y: list[float] | None,
     charge_method: str | None,
     n_jobs: int = 1,
+    cache_path: str | Path | None = None,
 ) -> list:
     """Build Chemprop datapoints; ``n_jobs != 1`` uses joblib (needed for NAGL)."""
     if y is not None and len(y) != len(smiles):
         raise ValueError("y must be the same length as smiles")
     labels = y if y is not None else [None] * len(smiles)
-    if n_jobs == 1 or len(smiles) < 2:
-        return [
-            molecule_datapoint(smi, lab, charge_method)
-            for smi, lab in zip(smiles, labels)
-        ]
-    from joblib import Parallel, delayed
+    parsed = [molecule_datapoint(smi, lab, None) for smi, lab in zip(smiles, labels)]
+    if charge_method is None:
+        return parsed
 
-    return Parallel(n_jobs=n_jobs, prefer="threads")(
-        delayed(molecule_datapoint)(smi, lab, charge_method)
-        for smi, lab in zip(smiles, labels)
-    )
+    mols = [None if point is None else point.mol for point in parsed]
+    show_bar = parse_charge_method(charge_method) == ChargeMethod.NAGL
+    pbar = _nagl_progress(sum(mol is not None for mol in mols), show_bar)
+    try:
+        charged = charges_for_smiles(
+            smiles,
+            charge_method,
+            cache_path,
+            mols=mols,
+            n_jobs=n_jobs,
+        )
+        attached: list = []
+        for smi, point in zip(smiles, parsed):
+            if point is None:
+                attached.append(None)
+                continue
+            charges = charged.get(smi)
+            if charges is None:
+                attached.append(None)
+                continue
+            attached.append(_attach_charges(point, smi, charge_method, charges))
+        return attached
+    finally:
+        if pbar is not None:
+            pbar.update(max(0, pbar.total - pbar.n))
+            pbar.close()
+
+
+def _attach_charges(point, smiles: str, charge_method: str, charges: np.ndarray):
+    expected = (point.mol.GetNumAtoms(), extra_atom_fdim(charge_method))
+    if charges.shape != expected:
+        logger.warning(
+            f"Dropping {smiles!r}: charge shape {charges.shape} != {expected}"
+        )
+        return None
+    point.V_f = charges
+    return point
 
 
 def build_featurizer(charge_method: str | None):
@@ -142,10 +193,11 @@ class ChempropClassifier:
 
     architecture = ARCHITECTURE
 
-    def __init__(self, model, featurizer, metadata: ModelMeta):
+    def __init__(self, model, featurizer, metadata: ModelMeta, outdir: Path | None = None):
         self.model = model
         self.featurizer = featurizer
         self.metadata = metadata
+        self.outdir = Path(outdir) if outdir is not None else None
 
     @classmethod
     def load(cls, outdir: str | Path) -> ChempropClassifier:
@@ -171,6 +223,7 @@ class ChempropClassifier:
             model=model,
             featurizer=build_featurizer(metadata.charge_method),
             metadata=metadata,
+            outdir=ckpt.outdir,
         )
 
     def predict(self, smiles: list[str] | pd.Series) -> pd.DataFrame:
@@ -183,12 +236,21 @@ class ChempropClassifier:
             return Predictions.validate(output.assign(**{probability: np.nan}))
 
         require_charge_backend(self.metadata.charge_method)
+        cache_path = None
+        if self.metadata.charge_method and self.outdir is not None:
+            candidate = charge_cache_path(self.outdir.parent, self.metadata.charge_method)
+            if candidate.exists():
+                cache_path = candidate
+        built = build_datapoints(
+            unique.tolist(),
+            None,
+            self.metadata.charge_method,
+            n_jobs=(-1 if self.metadata.charge_method == ChargeMethod.NAGL else 1),
+            cache_path=cache_path,
+        )
         kept: list[str] = []
         points = []
-        for smi in unique:
-            point = molecule_datapoint(
-                smi, y=None, charge_method=self.metadata.charge_method
-            )
+        for smi, point in zip(unique.tolist(), built):
             if point is None:
                 continue
             points.append(point)

@@ -25,7 +25,7 @@ contrib/<dataset>/  # ingest CSVs, call library trainers, write run dirs
 | `split` | Random / scaffold (or later) **compound** splitters returning positional indices | Fingerprint generation, model fitting |
 | `runs` | `resolve_run_dir`, `RunCheckpointer`, hashes, `config.json` / parquet paths | Featurization, metric formulas |
 | `report` | `compute_test_metrics`, `TrainingReport` markdown, `write_comparison_report` | Training, RDKit |
-| `train` | `prepare_training_run`, `train_xgb_classifier`, `train_chemprop_classifier`, `train_smiles_transformer` | Anything needed at **predict** time |
+| `train` | `prepare_training_run`, `train_xgb_classifier`, `train_rf_classifier`, `train_chemprop_classifier`, `train_smiles_transformer` | Anything needed at **predict** time |
 | `model` | Classifier classes, `load_classifier`, shared predict SMILES alignment | HPO, splitting, writing `report.md` |
 | `interpretation` | SHAP and structure highlighting | Training |
 | `contrib` | Dataset-specific column names, paths, script entrypoints | Library logic that another dataset would reuse |
@@ -58,9 +58,9 @@ New helpers go in the **lowest** package that matches the table above, not in th
 
 1. **Ingest** (contrib only): rename raw columns onto `CleanedTrainingData` / `Predictions`. String literals for vendor CSV headers stay here.
 2. **Prepare** (`train.prepare`): `clean_training_data` + `get_splitter` + freeze `SplitIndices` via `RunCheckpointer`. Split **compounds** before comparing fingerprints or architectures. Reuse the checkpointed split when hashes match.
-3. **Fit** (`train.xgb` / `chemprop` / `chemberta`): train only on train indices. Inner val is carved from train. Never tune on test.
-4. **Select** (XGBoost): cross-validation AUC picks the default fingerprint / `model.ubj`. Held-out test metrics are reported for every fingerprint and are **not** the selector.
-5. **Persist**: `resolve_run_dir(parent, architecture, split, charge_method=...)` under the contrib parent (e.g. `data/pfpkg/runs/pfpkg`). Callers pass the parent; trainers create `xgb_scaffold`, `chemprop_scaffold_nagl`, `chemberta_random`, …
+3. **Fit** (`train.xgb` / `rf` / `chemprop` / `chemberta`): train only on train indices. Inner val is carved from train when the architecture uses early stopping. Never tune on test.
+4. **Select** (XGBoost / random forest): when XGBoost `max_evals>=1`, cross-validation AUC picks the default fingerprint / `model.ubj`. When `max_evals=0`, and for random forest, the default artifact (`model.ubj` or `model.joblib`) is `DEFAULT_FINGERPRINT` (Morgan2FeatBits) if that generator was trained. Held-out test metrics are reported for every fingerprint and are **not** the selector.
+5. **Persist**: `resolve_run_dir(parent, architecture, split, charge_method=..., seed=...)` under the contrib parent (e.g. `data/pfpkg/runs/pfpkg`). Omit `seed` for the legacy experiment folder (`xgb_random`). With a seed, trainers create `{arch}_{split}[_charge]/seed_{n}` (e.g. `xgb_scaffold/seed_42`, `chemprop_scaffold_nagl/seed_42`). `replicate_seeds(n_rep, start=…)` is the library helper for consecutive replicate seeds; contrib chooses `n_rep`. Shared Chemprop charges live in `parent/charges/{method}.parquet`; shared XGB / random-forest fingerprints in `parent/features/`.
 6. **Score**: `compute_test_metrics` on the frozen test split; write `report.md` / `report.json`. Compare architectures with `write_comparison_report`.
 7. **Predict**: `load_classifier(outdir)` (or a specific classifier `.load`). Sanitize and featurize with the **same** `chemistry` functions and the metadata in the run dir (`fingerprint`, `fp_size`, `charge_method`, `pretrained_name`).
 
@@ -71,17 +71,22 @@ Predictions are triage hypotheses: persist probability and interpretation with t
 Chemprop and ChemBERTa live behind the `dl` extra. Do **not** import them from `ml_for_malaria.train.__init__` — that would pull torch on every `from ml_for_malaria.train import train_xgb_classifier`.
 
 ```python
-from ml_for_malaria.train import train_xgb_classifier
+from ml_for_malaria.train import train_rf_classifier, train_xgb_classifier
 from ml_for_malaria.train.chemprop import train_chemprop_classifier
 from ml_for_malaria.train.chemberta import train_smiles_transformer
 from ml_for_malaria.model import load_classifier
 from ml_for_malaria.chemistry import encode_binary_labels, sanitize_smiles, atom_charges
-from ml_for_malaria.runs import resolve_run_dir, completed_run_dirs, RunCheckpointer
+from ml_for_malaria.runs import (
+    resolve_run_dir,
+    completed_run_dirs,
+    RunCheckpointer,
+    replicate_seeds,
+)
 from ml_for_malaria.report import write_comparison_report, compute_test_metrics
 from ml_for_malaria.split import get_splitter
 ```
 
-`charge_method` (`None` / `gasteiger` / `nagl`) is Chemprop-only extra atom features. ChemBERTa has no charge vector. Failed sanitize or charge assignment **drops** the molecule; do not impute `q=0` or a dummy structure. `nagl` is the `nagl` extra (`uv sync --extra nagl`); `require_charge_backend` fails before training if those packages are missing.
+`charge_method` (`None` / `gasteiger` / `nagl`) is Chemprop-only extra atom features. ChemBERTa has no charge vector. Failed sanitize or charge assignment **drops** the molecule; do not impute `q=0` or a dummy structure. `nagl` is the `nagl` extra (`uv sync --extra nagl`); `require_charge_backend` fails before training if those packages are missing. SMILES-keyed charge vectors are cached in `chemistry` (`charges_for_smiles`) so multi-seed Chemprop does not recompute NAGL; the parquet lives on the contrib runs parent, not inside a seed run dir.
 
 ## Runs vs the library package
 

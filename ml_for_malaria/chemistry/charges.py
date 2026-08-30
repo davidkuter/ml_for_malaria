@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import threading
+from pathlib import Path
 
 import numpy as np
+import pandas as pd
 from loguru import logger
 from rdkit import Chem
 from rdkit.Chem import rdPartialCharges
 
-from ml_for_malaria.schemas import ChargeMethod
+from ml_for_malaria.schemas import AtomChargeCache, ChargeMethod, empty_frame
 
 NAGL_PARTIAL_CHARGE_METHOD = "openff-gnn-am1bcc-1.0.0.pt"
 NAGL_INSTALL_HINT = (
@@ -160,3 +162,117 @@ def _align_nagl_charges_to_rdkit(mol: Chem.Mol, offmol, values: np.ndarray) -> n
             )
         aligned[parents[0]] += values[idx]
     return aligned
+
+
+def charge_cache_path(parent: str | Path, method: str) -> Path:
+    """Parquet of SMILES-keyed charges under the runs parent, not a seed dir."""
+    parsed = parse_charge_method(method)
+    if parsed is None:
+        raise ValueError("charge cache requires a charge_method")
+    return Path(parent) / "charges" / f"{parsed}.parquet"
+
+
+def load_charge_cache(path: str | Path) -> pd.DataFrame:
+    cache_path = Path(path)
+    if not cache_path.exists():
+        return empty_frame(AtomChargeCache)
+    loaded = pd.read_parquet(cache_path)
+    return AtomChargeCache.validate(loaded)
+
+
+def save_charge_cache(path: str | Path, cache: pd.DataFrame) -> None:
+    cache_path = Path(path)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    AtomChargeCache.validate(cache).to_parquet(cache_path, index=False)
+
+
+def _charges_from_cache_row(values) -> np.ndarray:
+    array = np.asarray(values, dtype=np.float64)
+    if array.ndim == 1:
+        return array.reshape(-1, 1)
+    return array
+
+
+def charges_for_smiles(
+    smiles: list[str] | pd.Series,
+    method: str,
+    cache_path: str | Path | None = None,
+    *,
+    mols: list[Chem.Mol | None] | None = None,
+    n_jobs: int = 1,
+) -> dict[str, np.ndarray]:
+    """Return successful charge vectors, filling ``cache_path`` for misses only."""
+    parsed = parse_charge_method(method)
+    if parsed is None:
+        raise ValueError("charges_for_smiles requires a charge_method")
+    requested = pd.Series(list(smiles), dtype=str)
+    if mols is not None and len(mols) != len(requested):
+        raise ValueError("mols must be the same length as smiles")
+    cache = (
+        load_charge_cache(cache_path)
+        if cache_path is not None
+        else empty_frame(AtomChargeCache)
+    )
+    mol_list = (
+        list(mols) if mols is not None else [Chem.MolFromSmiles(smi) for smi in requested]
+    )
+    cached_map: dict[str, np.ndarray] = {}
+    if not cache.empty:
+        cached_map = {
+            smi: _charges_from_cache_row(values)
+            for smi, values in zip(
+                cache[AtomChargeCache.SMILES], cache[AtomChargeCache.charges]
+            )
+        }
+    found: dict[str, np.ndarray] = {}
+    misses: list[tuple[str, Chem.Mol]] = []
+    for smi, mol in zip(requested.tolist(), mol_list):
+        if mol is None:
+            continue
+        charges = cached_map.get(smi)
+        if charges is not None and charges.shape[0] == mol.GetNumAtoms():
+            found[smi] = charges
+            continue
+        misses.append((smi, mol))
+
+    def _assign(item: tuple[str, Chem.Mol]) -> tuple[str, np.ndarray] | None:
+        smi, mol = item
+        try:
+            return smi, atom_charges(mol, parsed)
+        except ChargeAssignmentError:
+            logger.warning(f"Dropping {smi!r}: charge assignment failed")
+            return None
+
+    unique_misses: list[tuple[str, Chem.Mol]] = []
+    seen: set[str] = set()
+    for smi, mol in misses:
+        if smi in seen:
+            continue
+        seen.add(smi)
+        unique_misses.append((smi, mol))
+    misses = unique_misses
+
+    computed: list[tuple[str, np.ndarray]] = []
+    if misses:
+        if n_jobs != 1 and len(misses) > 1:
+            from joblib import Parallel, delayed
+
+            results = Parallel(n_jobs=n_jobs, prefer="threads")(
+                delayed(_assign)(item) for item in misses
+            )
+        else:
+            results = [_assign(item) for item in misses]
+        computed = [row for row in results if row is not None]
+
+    found.update(dict(computed))
+    if cache_path is not None and computed:
+        added = pd.DataFrame(
+            {
+                AtomChargeCache.SMILES: [smi for smi, _ in computed],
+                AtomChargeCache.charges: [q.reshape(-1).tolist() for _, q in computed],
+            }
+        )
+        combined = pd.concat([cache, added], ignore_index=True)
+        combined = combined.drop_duplicates(AtomChargeCache.SMILES, keep="last")
+        save_charge_cache(cache_path, combined)
+    return found

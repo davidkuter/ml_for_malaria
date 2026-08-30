@@ -126,12 +126,19 @@ class RunCheckpointer:
     def fingerprint_model_path(self, fp_name: str) -> Path:
         return self.fingerprint_dir(fp_name) / "model.ubj"
 
+    def fingerprint_sklearn_path(self, fp_name: str) -> Path:
+        return self.fingerprint_dir(fp_name) / "model.joblib"
+
     def fingerprint_meta_path(self, fp_name: str) -> Path:
         return self.fingerprint_dir(fp_name) / "model_meta.json"
 
     @property
     def model_path(self) -> Path:
         return self.outdir / "model.ubj"
+
+    @property
+    def sklearn_model_path(self) -> Path:
+        return self.outdir / "model.joblib"
 
     @property
     def lightning_ckpt_path(self) -> Path:
@@ -158,7 +165,19 @@ class RunCheckpointer:
             return self.lightning_ckpt_path
         if architecture == Architecture.CHEMBERTA:
             return self.hf_model_dir / "config.json"
+        if architecture == Architecture.RANDOM_FOREST:
+            return self.sklearn_model_path
         return self.model_path
+
+    def _fingerprint_models_ready(self, expected: RunConfig) -> bool:
+        if not expected.fingerprints:
+            return True
+        first = expected.fingerprints[0]
+        if expected.architecture == Architecture.XGBOOST:
+            return self.fingerprint_model_path(first).exists()
+        if expected.architecture == Architecture.RANDOM_FOREST:
+            return self.fingerprint_sklearn_path(first).exists()
+        return True
 
     def run_complete(self, stored: RunConfig | None, expected: RunConfig) -> bool:
         if self.force or stored is None:
@@ -170,9 +189,4 @@ class RunCheckpointer:
             return False
         if not (self.meta_path.exists() and self.report_json_path.exists()):
             return False
-        xgb_models_ready = not (
-            expected.architecture == Architecture.XGBOOST
-            and expected.fingerprints
-            and not self.fingerprint_model_path(expected.fingerprints[0]).exists()
-        )
-        return xgb_models_ready
+        return self._fingerprint_models_ready(expected)

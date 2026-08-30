@@ -1346,6 +1346,7 @@ nagl = [
     { name = "pint" },
     { name = "python-constraint2" },
     { name = "torch" },
+    { name = "tqdm" },
     { name = "xmltodict" },
 ]
 
@@ -1385,6 +1386,7 @@ requires-dist = [
     { name = "tabulate", specifier = ">=0.10.0" },
     { name = "torch", marker = "extra == 'dl'" },
     { name = "torch", marker = "extra == 'nagl'" },
+    { name = "tqdm", marker = "extra == 'nagl'" },
     { name = "transformers", marker = "extra == 'dl'" },
     { name = "xgboost" },
     { name = "xmltodict", marker = "extra == 'nagl'" },
