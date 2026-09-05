@@ -32,8 +32,16 @@ def load_classifier(outdir: str | Path, fingerprint: str | None = None):
         from ml_for_malaria.model.chemprop_classifier import ChempropClassifier
 
         return ChempropClassifier.load(outdir)
+    if metadata.architecture == Architecture.CHEMELEON:
+        from ml_for_malaria.model.chemprop_classifier import ChempropClassifier
+
+        return ChempropClassifier.load(outdir)
     if metadata.architecture == Architecture.CHEMBERTA:
         from ml_for_malaria.model.smiles_transformer import SmilesTransformerClassifier
 
         return SmilesTransformerClassifier.load(outdir)
+    if metadata.architecture == Architecture.MONROE:
+        from ml_for_malaria.model.monroe_classifier import MonroeClassifier
+
+        return MonroeClassifier.load(outdir)
     raise ValueError(f"Unknown architecture {metadata.architecture!r} in {ckpt.outdir}")

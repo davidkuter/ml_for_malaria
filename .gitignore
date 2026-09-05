@@ -60,6 +60,7 @@ data/pfpkg/runs/*
 !data/pfpkg/runs/pfpkg/
 data/pfpkg/runs/pfpkg/*
 !data/pfpkg/runs/pfpkg/model_comparison_report.md
+!data/pfpkg/runs/pfpkg/scaffold_roc_tukey.png
 
 # Training run artifacts at repo root (not ml_for_malaria/runs)
 /runs/
@@ -76,3 +77,6 @@ env
 
 # Local env activation (WSL / machine-specific)
 activate.sh
+
+# Secrets / machine-local config (copy from .local.env.example)
+.local.env

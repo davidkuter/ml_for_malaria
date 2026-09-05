@@ -35,7 +35,13 @@ class Architecture(StrEnum):
     KNN = "knn"
     LOGISTIC = "logistic"
     CHEMPROP = "chemprop"
+    CHEMELEON = "chemeleon"
     CHEMBERTA = "chemberta"
+    MONROE = "monroe"
+
+
+class FoundationModel(StrEnum):
+    CHEMELEON = "chemeleon"
 
 
 FINGERPRINT_ARCHITECTURES = frozenset(
@@ -224,6 +230,7 @@ class RunConfig(JsonModel):
     charge_method: str | None = None
     freeze_encoder: bool | None = None
     hidden_size: int | None = None
+    foundation: str | None = None
     yscramble: bool | None = None
 
 
@@ -236,6 +243,7 @@ class ModelMeta(JsonModel):
     pretrained_name: str | None = None
     charge_method: str | None = None
     freeze_encoder: bool | None = None
+    foundation: str | None = None
 
 
 class TrainingReport(JsonModel):
@@ -251,6 +259,7 @@ class TrainingReport(JsonModel):
     charge_method: str | None = None
     pretrained_name: str | None = None
     max_evals: int | None = None
+    foundation: str | None = None
     yscramble: bool = False
 
 

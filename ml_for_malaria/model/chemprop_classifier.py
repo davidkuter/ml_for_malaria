@@ -17,6 +17,9 @@ from ml_for_malaria.model.predict import prepare_predict_smiles
 from ml_for_malaria.runs.checkpoints import RunCheckpointer
 from ml_for_malaria.schemas import Architecture, ChargeMethod, ModelMeta, Predictions
 
+CHEMPROP_ARCHITECTURES = frozenset(
+    {Architecture.CHEMPROP, Architecture.CHEMELEON}
+)
 ARCHITECTURE = Architecture.CHEMPROP
 _EXTRA_ATOM_FDIM = 1
 
@@ -209,11 +212,11 @@ class ChempropClassifier:
                 "Expected model.ckpt and model_meta.json"
             )
         metadata = ModelMeta.model_validate(ckpt.load_json(ckpt.meta_path))
-        if metadata.architecture != ARCHITECTURE:
+        if metadata.architecture not in CHEMPROP_ARCHITECTURES:
             raise ValueError(
                 f"Run directory {ckpt.outdir} was trained with "
                 f"architecture={metadata.architecture!r}, "
-                f"not {ARCHITECTURE!r}."
+                f"expected one of {sorted(CHEMPROP_ARCHITECTURES)}."
             )
         model = MPNN.load_from_checkpoint(
             str(ckpt.lightning_ckpt_path), map_location="cpu"

@@ -56,6 +56,30 @@ def fit_one_run(
                 force=force,
                 yscramble=yscramble,
             )
+        elif architecture == Architecture.CHEMELEON:
+            from ml_for_malaria.schemas import FoundationModel
+            from ml_for_malaria.train.chemprop import train_chemprop_classifier
+
+            result = train_chemprop_classifier(
+                df=df,
+                outdir=outdir,
+                split=split,
+                seed=seed,
+                foundation=FoundationModel.CHEMELEON,
+                force=force,
+                yscramble=yscramble,
+            )
+        elif architecture == Architecture.MONROE:
+            from ml_for_malaria.train.monroe import train_monroe_classifier
+
+            result = train_monroe_classifier(
+                df=df,
+                outdir=outdir,
+                split=split,
+                seed=seed,
+                force=force,
+                yscramble=yscramble,
+            )
         elif architecture == Architecture.RANDOM_FOREST:
             result = train_rf_classifier(
                 df=df,

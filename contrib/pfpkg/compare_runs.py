@@ -7,6 +7,7 @@ import pandas as pd
 from loguru import logger
 
 from ml_for_malaria.chemistry import encode_binary_labels
+from ml_for_malaria.env import load_local_env
 from ml_for_malaria.report import (
     best_fixed_scaffold_identifier,
     write_comparison_report,
@@ -53,6 +54,8 @@ PFPKG_JOBS = (
     PfpkgJob(Architecture.CHEMPROP, "scaffold"),
     PfpkgJob(Architecture.CHEMPROP, "scaffold", ChargeMethod.GASTEIGER),
     PfpkgJob(Architecture.CHEMPROP, "scaffold", ChargeMethod.NAGL),
+    PfpkgJob(Architecture.CHEMELEON, "scaffold"),
+    PfpkgJob(Architecture.MONROE, "scaffold"),
     PfpkgJob(Architecture.RANDOM_FOREST, "random"),
     PfpkgJob(Architecture.RANDOM_FOREST, "scaffold"),
     PfpkgJob(Architecture.XGBOOST, "scaffold"),
@@ -83,7 +86,12 @@ def _job_max_evals(job: PfpkgJob) -> int:
 
 
 def _gpu_architecture(architecture: str) -> bool:
-    return architecture in (Architecture.CHEMPROP, Architecture.CHEMBERTA)
+    return architecture in (
+        Architecture.CHEMPROP,
+        Architecture.CHEMELEON,
+        Architecture.CHEMBERTA,
+        Architecture.MONROE,
+    )
 
 
 def hpo_jobs_from_aggregates(
@@ -179,6 +187,7 @@ def run_pfpkg_suite(
 
 
 def main() -> None:
+    load_local_env()
     logger.info(f"Loading data from: {DATASET_PATH}")
     df = load_training_frame(DATASET_PATH)
     run_dirs = run_pfpkg_suite(df, RUNS, force=FORCE, n_rep=N_REP, seed_start=SEED_START)

@@ -55,11 +55,18 @@ link-mode = "copy"
 
 [project.optional-dependencies]
 dl = [
-    "chemprop>=2.1",
+    "chemprop>=2.2",
     "torch",
     "transformers",
     "accelerate",
     "lightning",
+]
+# Monroe frozen encoder lives in MONROE_HOME; TabPFN is the in-context head.
+monroe = [
+    "tabpfn>=8.3.0",
+    "torch",
+    "torch-geometric",
+    "wandb",
 ]
 # Official OpenFF wheels on PyPI are yanked; install from GitHub (plus models from PyPI).
 nagl = [
