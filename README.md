@@ -16,6 +16,22 @@ That creates `.venv`, installs runtime and `dev` dependencies, and installs the 
 uv sync --extra dl
 ```
 
+Chemprop + CheMeleon uses the same `dl` extra (`chemprop>=2.2`). Monroe + TabPFN needs a [Monroe](https://github.com/blazejba/monroe) checkout (`MONROE_HOME`, Git LFS weights) plus:
+
+```bash
+uv sync --extra dl --extra monroe
+```
+
+Secrets and machine paths go in a gitignored `.local.env` (copy from `.local.env.example`):
+
+```bash
+TABPFN_TOKEN=...
+TABPFN_MODEL_VERSION=v3
+MONROE_HOME=/path/to/monroe
+```
+
+`ml_for_malaria.env.load_local_env()` loads that file; process/shell env wins when a key is already set.
+
 Chemprop `charge_method="nagl"` needs the OpenFF extra (GitHub sources; official PyPI wheels are yanked):
 
 ```bash

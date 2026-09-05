@@ -2,13 +2,13 @@
 
 Held-out test metrics, seeds 42–51 (`n_rep=10`). Ranking uses ROC-AUC and PR-AUC as **mean ± sample std** (`ddof=1`, n=10). F1 and accuracy are at a fixed 0.5 threshold. Assay is 100 nM haemozoin (β-haematin) binary labels, not whole-cell *P. falciparum*.
 
-Fingerprint models used a **fixed recipe** unless noted: no TPE / k-fold CV. XGB early-stops on an inner val slice of **train**. RF fits 200 trees with `class_weight="balanced"`. Tanimoto *k*-NN is *k*=5 with Jaccard distance on binary bits (1 − Tanimoto) and distance weights. L2-logistic is `C=1`, balanced class weights, `lbfgs`. The default saved artifact is Morgan2FeatBits (`model.ubj` / `model.joblib`); every fingerprint was still scored. Chemprop charges were reused from the parent `charges/` cache.
+Fingerprint models used a **fixed recipe** unless noted: no TPE / k-fold CV. XGB early-stops on an inner val slice of **train**. RF fits 200 trees with `class_weight="balanced"`. Tanimoto *k*-NN is *k*=5 with Jaccard distance on binary bits (1 − Tanimoto) and distance weights. L2-logistic is `C=1`, balanced class weights, `lbfgs`. The default saved artifact is Morgan2FeatBits (`model.ubj` / `model.joblib`); every fingerprint was still scored. Chemprop charges were reused from the parent `charges/` cache. CheMeleon initialises Chemprop message passing from the Zenodo foundation weights (no charges). Monroe keeps a frozen 720-d encoder and fits TabPFN in-context on train embeddings only (shared `features/monroe_embeddings.npz`).
 
-After the fixed-recipe ranking, the **best scaffold fingerprint per tree architecture** (RF Morgan2Bits, XGB RDKit) was TPE-tuned (`max_evals=50`, train-fold ROC-AUC only) into `{arch}_scaffold_hpo/seed_{n}`. Fingerprint identity was chosen from the fixed-recipe **test** leaderboard, then HPO was train-only on the same seeded scaffold splits. Chemprop, ChemBERTa, *k*-NN, and logistic were not tuned.
+After the fixed-recipe ranking, the **best scaffold fingerprint per tree architecture** (RF Morgan2Bits, XGB RDKit) was TPE-tuned (`max_evals=50`, train-fold ROC-AUC only) into `{arch}_scaffold_hpo/seed_{n}`. Fingerprint identity was chosen from the fixed-recipe **test** leaderboard, then HPO was train-only on the same seeded scaffold splits. Chemprop, CheMeleon, ChemBERTa, Monroe, *k*-NN, and logistic were not tuned.
 
 A **y-scramble** of every suite job (train labels permuted, test labels real, no HPO) was written to `{arch}_{split}[_charge]_yscramble/seed_{n}`. `cleaned.parquet` still holds the assay labels; the permutation is in-memory at fit time.
 
-Replicates live under `{architecture}_{split}[_charge][_hpo][_yscramble]/seed_{n}/`. Sources: `comparison.md` / `comparison.json` from `contrib/pfpkg/compare_runs.py`.
+Replicates live under `{architecture}_{split}[_charge][_hpo][_yscramble]/seed_{n}/`. Sources: `comparison.md` / `comparison.json` from `contrib/pfpkg/compare_runs.py`. Foundation-model arms follow the Walters / ExpansionRx comparison pattern ([blog](https://patwalters.github.io/Let-the-Agents-Do-the-Benchmarking/)); the assay here remains binary 100 nM haemozoin, not ADMET regression.
 
 ## Random-split fingerprint models are not candidates
 
@@ -39,10 +39,15 @@ Y-scramble of the same random splits also falls to ~0.50 ROC (RF Morgan2Bits 0.5
 
 Mean `n_train` ≈ 293, mean `n_test` ≈ 63 (scaffold groups move the split size; seed 45 had 102 test compounds). NAGL Chemprop is one train molecule shorter on average (`n_train` 291.8).
 
+Tukey HSD on held-out ROC-AUC (fixed-recipe scaffold; best fingerprint per tree architecture; α = 0.05). Blue = best mean; grey = not significantly different from best; red = significantly worse. Dashed lines mark the best method's simultaneous CI. Source: `scaffold_roc_tukey.png` from `write_comparison_report`.
+
+![Tukey HSD scaffold ROC-AUC](scaffold_roc_tukey.png)
+
 | Model | ROC-AUC | PR-AUC | Weighted F1 @0.5 |
 |---|---|---|---|
 | RF Morgan2Bits | 0.9340 ± 0.0273 | 0.9428 ± 0.0231 | 0.8650 ± 0.0462 |
 | RF Morgan2FeatBits (saved default) | 0.9332 ± 0.0289 | 0.9390 ± 0.0308 | 0.8608 ± 0.0564 |
+| Monroe + TabPFN | 0.9322 ± 0.0243 | 0.9447 ± 0.0171 | 0.8693 ± 0.0482 |
 | L2-logistic Morgan2Bits | 0.9319 ± 0.0254 | 0.9428 ± 0.0264 | 0.8555 ± 0.0362 |
 | RF Morgan3Bits | 0.9315 ± 0.0257 | 0.9441 ± 0.0229 | 0.8694 ± 0.0463 |
 | L2-logistic Morgan3Bits | 0.9296 ± 0.0260 | 0.9407 ± 0.0262 | 0.8713 ± 0.0287 |
@@ -52,6 +57,7 @@ Mean `n_train` ≈ 293, mean `n_test` ≈ 63 (scaffold groups move the split siz
 | RF RDKit | 0.9230 ± 0.0315 | 0.9403 ± 0.0280 | 0.8470 ± 0.0388 |
 | L2-logistic Morgan2FeatBits (saved default) | 0.9203 ± 0.0334 | 0.9319 ± 0.0358 | 0.8521 ± 0.0530 |
 | RF AtomPair | 0.9199 ± 0.0305 | 0.9309 ± 0.0230 | 0.8625 ± 0.0483 |
+| ChemProp + CheMeleon | 0.9185 ± 0.0302 | 0.9342 ± 0.0255 | 0.8504 ± 0.0432 |
 | Tanimoto *k*-NN Morgan3FeatBits | 0.9151 ± 0.0463 | 0.8958 ± 0.0561 | 0.8467 ± 0.0670 |
 | XGB RDKit | 0.9135 ± 0.0306 | 0.9300 ± 0.0342 | 0.8318 ± 0.0524 |
 | L2-logistic AtomPair | 0.9126 ± 0.0402 | 0.9275 ± 0.0285 | 0.8456 ± 0.0702 |
@@ -121,7 +127,7 @@ Both deltas sit well inside seed error (~0.03 ROC). **Tuning did not change the 
 
 The XGB search space used here is sized for this n (`alpha` 0–10, `gamma` 0–5, `lambda` 0.1–10). A leftover range (`alpha` 10–200) collapses CV AUC to 0.5 on ~290 compounds and is not a fair HPO.
 
-Chemprop, ChemBERTa, *k*-NN, and logistic were not given TPE. That would be a different compute budget, not a missing Δ in this table.
+Chemprop, CheMeleon, ChemBERTa, Monroe, *k*-NN, and logistic were not given TPE. That would be a different compute budget, not a missing Δ in this table.
 
 ## Y-scramble (train labels permuted)
 
@@ -133,8 +139,10 @@ Scaffold rows (all 10 seeds):
 |---|---|---|---|---|---|
 | RF Morgan2Bits | 0.9340 ± 0.0273 | 0.4657 ± 0.1381 | −0.4683 | −0.4065 | −0.4319 |
 | RF Morgan2FeatBits | 0.9332 ± 0.0289 | 0.4403 ± 0.1100 | −0.4930 | −0.4312 | −0.4293 |
+| Monroe + TabPFN | 0.9322 ± 0.0243 | 0.4698 ± 0.1050 | −0.4624 | −0.4286 | −0.5286 |
 | L2-logistic Morgan2Bits | 0.9319 ± 0.0254 | 0.4823 ± 0.1385 | −0.4496 | −0.3861 | −0.3825 |
 | L2-logistic Morgan3Bits | 0.9296 ± 0.0260 | 0.4847 ± 0.1417 | −0.4449 | −0.3845 | −0.4004 |
+| ChemProp + CheMeleon | 0.9185 ± 0.0302 | 0.5091 ± 0.1868 | −0.4094 | −0.3823 | −0.4373 |
 | Tanimoto *k*-NN Morgan3FeatBits | 0.9151 ± 0.0463 | 0.4606 ± 0.1015 | −0.4545 | −0.3717 | −0.3829 |
 | Tanimoto *k*-NN Morgan3Bits | 0.9124 ± 0.0278 | 0.4834 ± 0.1302 | −0.4290 | −0.3774 | −0.3728 |
 | XGB RDKit | 0.9135 ± 0.0306 | 0.5524 ± 0.1044 | −0.3611 | −0.3109 | −0.3080 |
@@ -144,7 +152,7 @@ Scaffold rows (all 10 seeds):
 | Chemprop none | 0.7917 ± 0.1033 | 0.3749 ± 0.1250 | −0.4168 | −0.3255 | −0.3749 |
 | Chemprop Gasteiger | 0.7805 ± 0.1112 | 0.3676 ± 0.1079 | −0.4129 | −0.3260 | −0.3666 |
 
-Every architecture loses ~0.36–0.49 ROC. Trees, logistic, *k*-NN, and ChemBERTa land on chance (RF / logistic / *k*-NN slightly below 0.5; XGB RDKit 0.55 ± 0.10 still overlaps 0.5). Chemprop falls **below** chance and almost never calls the active class at 0.5 (`f1_1` ≈ 0.05): a D-MPNN fit on noise collapses toward inactive scores that anti-rank the real test labels. That is not leftover SAR; it is a broken predictor.
+Every architecture loses ~0.36–0.49 ROC. Trees, logistic, *k*-NN, Monroe, CheMeleon, and ChemBERTa land on chance (RF / logistic / *k*-NN / Monroe slightly below 0.5; CheMeleon 0.51 ± 0.19 overlaps 0.5). From-scratch Chemprop falls **below** chance and almost never calls the active class at 0.5 (`f1_1` ≈ 0.05): a D-MPNN fit on noise collapses toward inactive scores that anti-rank the real test labels. That is not leftover SAR; it is a broken predictor.
 
 The real-label ranking is therefore label-dependent, not an artifact of scaffold split geometry or hashed fingerprints reconstructing the split. Y-scramble artifacts are a negative control — do not use them for predict.
 
@@ -156,21 +164,37 @@ Frozen DeepChem/ChemBERTa-77M-MTR, no fingerprints, no charges.
 
 **Limits.** 0.5-threshold F1 (0.773 ± 0.117) is clearly worse than RF / logistic (~0.86) and XGB / *k*-NN (~0.83). Seed 45 (`n_test=102`) collapses accuracy to 0.52 — the same hard scaffold split that hurts Chemprop. Frozen encoder + small n is a capacity mismatch, not a haemozoin-specific finding. Heavier than trees; needs the `dl` extra.
 
-## Chemprop (D-MPNN)
+## Monroe + TabPFN (frozen graph foundation)
 
-Graph messages on the molecular graph; optional Gasteiger or NAGL atom charges.
+Frozen Monroe GRIT encoder (720-d embeddings) with TabPFN v3 in-context classification — no gradient fine-tuning. Protocol matches Walters’ ExpansionRx arm; embeddings are cached once under `features/monroe_embeddings.npz`. Needs `MONROE_HOME` + `TABPFN_TOKEN` (see `.local.env.example`).
+
+**Merits.** Ties the top of the board: ROC 0.9322 ± 0.0243, PR 0.9447 ± 0.0171, weighted F1 0.8693 ± 0.0482 — within seed error of RF Morgan2Bits and logistic Morgan2Bits, with the tightest PR std among the leaders. No fingerprint choice and no Chemprop training loop. Y-scramble drops to 0.47 ROC (−0.46), so the real-label score is label-dependent.
+
+**Limits.** External checkout + licence-gated TabPFN weights. Conformer featurization and TabPFN are heavier than trees. Predictions re-run in-context TabPFN from the saved support set (no conventional `model.ubj`). Still a triage probability for 100 nM haemozoin, not potency.
+
+## ChemProp + CheMeleon (foundation fine-tune)
+
+Same Chemprop D-MPNN trainer as the from-scratch arms, but message passing is initialised from CheMeleon Zenodo weights and fine-tuned with a new binary FFN (no atom charges).
+
+**Merits.** ROC 0.9185 ± 0.0302 / PR 0.9342 ± 0.0255 — about **+0.12 ROC** vs from-scratch Chemprop (~0.78–0.80) and squarely in the RF AtomPair / logistic Morgan2FeatBits band. Foundation init is what makes the graph model competitive on this n. Y-scramble lands on chance (0.51 ± 0.19).
+
+**Limits.** Still below Monroe and the best RF / logistic rows by ~0.01–0.015 ROC (inside seed noise vs mid-pack fingerprints, not vs the top). Larger checkpoints and longer CPU/GPU train than trees. Do not confuse with from-scratch Chemprop in the ranking table.
+
+## Chemprop (D-MPNN, from scratch)
+
+Graph messages on the molecular graph; optional Gasteiger or NAGL atom charges. No foundation init.
 
 **Merits.** The architecture that *should* see haem-binding motifs as bonded environments rather than hashed bits. NAGL is the chemically nicest charge extra. Train/predict stay aligned via the SMILES-keyed charge cache.
 
-**Limits.** Weakest and least stable: ROC ~0.78–0.80 ± 0.10. None / Gasteiger / NAGL **overlap completely** — charges do not improve ranking. Seed 51 drops to ~0.59 ROC across charge methods; seed 45 (`n_test=102`) is also poor. A D-MPNN on ~290 compounds is underdetermined relative to RF or logistic on 2048-bit fingerprints. Use Chemprop here as a negative control on “graphs will win,” not as the triage model.
+**Limits.** Weakest and least stable among non-foundation graph/SMILES models: ROC ~0.78–0.80 ± 0.10. None / Gasteiger / NAGL **overlap completely** — charges do not improve ranking. Seed 51 drops to ~0.59 ROC across charge methods; seed 45 (`n_test=102`) is also poor. A D-MPNN on ~290 compounds is underdetermined relative to RF or logistic on 2048-bit fingerprints — unless CheMeleon-initialised (above). Use from-scratch Chemprop here as a negative control on “graphs will win,” not as the triage model.
 
 ## Across architectures (scaffold)
 
-- **Ranking:** RF fingerprints ≈ L2-logistic (≈0.92–0.93) ≳ Tanimoto *k*-NN ≈ XGB (≈0.89–0.92) ≳ ChemBERTa (0.88) > Chemprop (≈0.79). RF vs logistic ROC intervals overlap completely; *k*-NN vs XGB likewise. Chemprop does not catch the fingerprint models.
-- **What the new controls add:** logistic matching RF means the SAR is largely **linear in the bits**. *k*-NN a step below means nearest-neighbour lookup is strong but not the whole score. Neither control needed another GNN to earn its place.
-- **0.5-threshold F1:** logistic Morgan3Bits and RF Morgan3Bits are strongest (~0.87); RF / logistic generally ~0.85–0.87; XGB / *k*-NN next; ChemBERTa and Chemprop are not usable as a 0.5 classifier without retuning the threshold.
+- **Ranking:** RF fingerprints ≈ Monroe + TabPFN ≈ L2-logistic (≈0.92–0.93) ≳ ChemProp + CheMeleon ≈ RF AtomPair (≈0.92) ≳ Tanimoto *k*-NN ≈ XGB (≈0.89–0.92) ≳ ChemBERTa (0.88) > from-scratch Chemprop (≈0.79). Monroe sits inside the RF / logistic band; CheMeleon lifts Chemprop into the mid fingerprint pack.
+- **What the new controls add:** logistic matching RF means the SAR is largely **linear in the bits**. Monroe matching that band with a frozen foundation + TabPFN shows a strong pretrained representation without tree HPO. CheMeleon shows foundation init is required for Chemprop to compete here; from-scratch graphs do not.
+- **0.5-threshold F1:** logistic Morgan3Bits, RF Morgan3Bits, and Monroe are strongest (~0.87); RF / logistic / CheMeleon generally ~0.85–0.87; XGB / *k*-NN next; ChemBERTa and from-scratch Chemprop are not usable as a 0.5 classifier without retuning the threshold.
 - **Fingerprints and charges:** not separable once seed error is included. Do not pick Morgan2 vs RDKit vs NAGL from 0.01–0.02 mean differences.
-- **HPO:** TPE on the best fixed-recipe scaffold fingerprint does not move RF or XGB outside seed noise. Persist the **fixed** scaffold RF or logistic (Morgan2FeatBits default is still among the best RF rows). Tuned RDKit XGB is not a new winner. Treat probabilities as a ranking for azole-related haemozoin inhibition at 100 nM, not potency.
-- **Y-scramble:** permuting train labels (test labels real) drops every architecture by ~0.36–0.49 ROC. Trees, logistic, *k*-NN, and ChemBERTa go to chance; Chemprop goes below chance by collapsing to inactive. The real-label AUCs are not a split artifact.
+- **HPO:** TPE on the best fixed-recipe scaffold fingerprint does not move RF or XGB outside seed noise. Persist the **fixed** scaffold RF or logistic (Morgan2FeatBits default is still among the best RF rows), or Monroe if the TabPFN / Monroe stack is available. Tuned RDKit XGB is not a new winner. Treat probabilities as a ranking for azole-related haemozoin inhibition at 100 nM, not potency.
+- **Y-scramble:** permuting train labels (test labels real) drops every architecture by ~0.36–0.49 ROC. Trees, logistic, *k*-NN, Monroe, CheMeleon, and ChemBERTa go to chance; from-scratch Chemprop goes below chance by collapsing to inactive. The real-label AUCs are not a split artifact.
 
-0.01–0.03 AUC is not a leaderboard given `n_test` that moves with the scaffold split. Random-split RF and *k*-NN remain leakage diagnostics: use the scaffold Morgan2Bits RF (or logistic Morgan2Bits) row as the reference, not as a competitor in the ranking table.
+0.01–0.03 AUC is not a leaderboard given `n_test` that moves with the scaffold split. Random-split RF and *k*-NN remain leakage diagnostics: use the scaffold Morgan2Bits RF (or logistic Morgan2Bits / Monroe) row as the reference, not as a competitor in the ranking table.

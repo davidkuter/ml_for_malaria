@@ -146,6 +146,10 @@ class RunCheckpointer:
         return self.outdir / "model.ckpt"
 
     @property
+    def monroe_support_path(self) -> Path:
+        return self.outdir / "monroe_support.npz"
+
+    @property
     def hf_model_dir(self) -> Path:
         return self.outdir / "hf_model"
 
@@ -162,10 +166,12 @@ class RunCheckpointer:
         return self.outdir / self.REPORT_MD
 
     def model_artifact_path(self, architecture: str) -> Path:
-        if architecture == Architecture.CHEMPROP:
+        if architecture in (Architecture.CHEMPROP, Architecture.CHEMELEON):
             return self.lightning_ckpt_path
         if architecture == Architecture.CHEMBERTA:
             return self.hf_model_dir / "config.json"
+        if architecture == Architecture.MONROE:
+            return self.monroe_support_path
         if architecture in SKLEARN_JOBLIB_ARCHITECTURES:
             return self.sklearn_model_path
         return self.model_path

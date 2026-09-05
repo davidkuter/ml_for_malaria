@@ -58,6 +58,8 @@ def test_run_dirname_encodes_architecture_split_and_charge():
         == "chemprop_scaffold_nagl"
     )
     assert run_dirname(Architecture.CHEMBERTA, "scaffold") == "chemberta_scaffold"
+    assert run_dirname(Architecture.CHEMELEON, "scaffold") == "chemeleon_scaffold"
+    assert run_dirname(Architecture.MONROE, "scaffold") == "monroe_scaffold"
     assert run_dirname(Architecture.RANDOM_FOREST, "scaffold") == "rf_scaffold"
     assert run_dirname(Architecture.KNN, "scaffold") == "knn_scaffold"
     assert run_dirname(Architecture.LOGISTIC, "scaffold") == "logistic_scaffold"

@@ -125,6 +125,7 @@ def build_report(
     charge_method: str | None = None,
     pretrained_name: str | None = None,
     max_evals: int | None = None,
+    foundation: str | None = None,
     yscramble: bool = False,
 ) -> TrainingReport:
     return TrainingReport(
@@ -140,6 +141,7 @@ def build_report(
         charge_method=charge_method,
         pretrained_name=pretrained_name,
         max_evals=max_evals,
+        foundation=foundation,
         yscramble=yscramble,
     )
 
@@ -380,6 +382,13 @@ def _run_identifier(
         if name is None and meta is not None:
             name = meta.pretrained_name
         return name or _NONE_IDENTIFIER
+    if report.architecture == Architecture.CHEMELEON:
+        name = report.foundation
+        if name is None and meta is not None:
+            name = meta.foundation
+        return name or Architecture.CHEMELEON
+    if report.architecture == Architecture.MONROE:
+        return "TabPFN"
     if charge_method:
         return charge_method
     return _NONE_IDENTIFIER
@@ -1019,4 +1028,13 @@ def write_comparison_report(
     md_path = out_path.with_suffix(".md")
     json_path.write_text(comparison.model_dump_json(indent=2), encoding="utf-8")
     md_path.write_text(comparison_to_markdown(comparison), encoding="utf-8")
+    try:
+        from ml_for_malaria.report_plots import write_tukey_hsd_plot
+
+        write_tukey_hsd_plot(
+            comparison,
+            out_path.with_name("scaffold_roc_tukey.png"),
+        )
+    except Exception as exc:  # noqa: BLE001 — plot is best-effort beside the tables
+        logger.warning(f"Could not write Tukey HSD plot: {exc}")
     return comparison

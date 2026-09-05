@@ -15,7 +15,6 @@ from ml_for_malaria.chemistry.charges import (
     require_charge_backend,
 )
 from ml_for_malaria.model.chemprop_classifier import (
-    ARCHITECTURE,
     ChempropClassifier,
     binary_mol_probabilities,
     build_datapoints,
@@ -27,8 +26,10 @@ from ml_for_malaria.model.chemprop_classifier import (
 from ml_for_malaria.report import build_report, compute_test_metrics, write_report
 from ml_for_malaria.runs.paths import resolve_run_dir
 from ml_for_malaria.schemas import (
+    Architecture,
     ChargeMethod,
     CleanedTrainingData,
+    FoundationModel,
     ModelMeta,
     RunConfig,
     TrainingReport,
@@ -50,6 +51,9 @@ _PARAMS_HIDDEN = "hidden_size"
 _PARAMS_DEPTH = "depth"
 _PARAMS_DROPOUT = "dropout"
 _PARAMS_EXTRA_ATOM_FDIM = "extra_atom_fdim"
+_PARAMS_FOUNDATION = "foundation"
+CHEMELEON_ZENODO_URL = "https://zenodo.org/records/15460715/files/chemeleon_mp.pt"
+CHEMELEON_CACHE_NAME = "chemeleon_mp.pt"
 
 
 @dataclass
@@ -67,6 +71,7 @@ def _require_lightning_chemprop():
         from chemprop.nn import (
             BinaryClassificationFFN,
             BondMessagePassing,
+            MeanAggregation,
             NormAggregation,
         )
         from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
@@ -83,9 +88,35 @@ def _require_lightning_chemprop():
         BinaryClassificationFFN,
         BondMessagePassing,
         NormAggregation,
+        MeanAggregation,
         EarlyStopping,
         ModelCheckpoint,
     )
+
+
+def parse_foundation(foundation: str | None) -> str | None:
+    if foundation is None:
+        return None
+    value = FoundationModel(foundation)
+    return str(value)
+
+
+def _chemeleon_mp_path() -> Path:
+    cache = Path.home() / ".chemprop" / CHEMELEON_CACHE_NAME
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    if cache.exists() and cache.stat().st_size > 10_000_000:
+        return cache
+    if cache.exists():
+        logger.warning(f"Removing incomplete CheMeleon cache at {cache}")
+        cache.unlink()
+    from urllib.request import urlretrieve
+
+    logger.info(
+        f"Downloading CheMeleon foundation weights from Zenodo to {cache} "
+        "(cite DOI 10.48550/arXiv.2506.15792)"
+    )
+    urlretrieve(CHEMELEON_ZENODO_URL, cache)
+    return cache
 
 
 def _build_mpnn(featurizer, hidden_size: int, dropout: float, depth: int):
@@ -97,6 +128,7 @@ def _build_mpnn(featurizer, hidden_size: int, dropout: float, depth: int):
         BinaryClassificationFFN,
         BondMessagePassing,
         NormAggregation,
+        _,
         _,
         _,
     ) = _require_lightning_chemprop()
@@ -113,6 +145,33 @@ def _build_mpnn(featurizer, hidden_size: int, dropout: float, depth: int):
         dropout=dropout,
     )
     return MPNN(mp, NormAggregation(), ffn)
+
+
+def _build_chemeleon_mpnn(dropout: float, hidden_size: int):
+    """Message-passing from CheMeleon; new binary FFN head; MP weights trainable."""
+    import torch
+
+    (
+        _,
+        _,
+        _,
+        MPNN,
+        BinaryClassificationFFN,
+        BondMessagePassing,
+        _,
+        MeanAggregation,
+        _,
+        _,
+    ) = _require_lightning_chemprop()
+    payload = torch.load(_chemeleon_mp_path(), map_location="cpu", weights_only=True)
+    mp = BondMessagePassing(**payload["hyper_parameters"])
+    mp.load_state_dict(payload["state_dict"])
+    ffn = BinaryClassificationFFN(
+        input_dim=mp.output_dim,
+        hidden_dim=hidden_size,
+        dropout=dropout,
+    )
+    return MPNN(mp, MeanAggregation(), ffn)
 
 
 def _datapoints_for_index_groups(
@@ -180,6 +239,7 @@ def train_chemprop_classifier(
     test_size: float = 0.2,
     force: bool = False,
     charge_method: str | None = None,
+    foundation: str | None = None,
     max_epochs: int = DEFAULT_MAX_EPOCHS,
     batch_size: int = DEFAULT_BATCH_SIZE,
     hidden_size: int = DEFAULT_HIDDEN_SIZE,
@@ -195,6 +255,7 @@ def train_chemprop_classifier(
     ``outdir`` is the parent runs directory; artifacts go in
     ``{outdir}/{arch}_{split}[_charge][_yscramble]/seed_{seed}/`` when ``seed`` is passed through
     ``resolve_run_dir``.
+    ``foundation="chemeleon"`` initialises message passing from CheMeleon (no charges).
     ``n_jobs`` defaults to all cores for NAGL charges and 1 otherwise.
     ``yscramble=True`` permutes train labels only; test labels stay real.
     """
@@ -206,9 +267,21 @@ def train_chemprop_classifier(
         _,
         _,
         _,
+        _,
         EarlyStopping,
         ModelCheckpoint,
     ) = _require_lightning_chemprop()
+    foundation = parse_foundation(foundation)
+    if foundation is not None and charge_method is not None:
+        raise ValueError(
+            "Chemprop foundation models do not support charge_method; "
+            f"got foundation={foundation!r}, charge_method={charge_method!r}"
+        )
+    architecture = (
+        Architecture.CHEMELEON
+        if foundation == FoundationModel.CHEMELEON
+        else Architecture.CHEMPROP
+    )
     charge_method = parse_charge_method(charge_method)
     if n_jobs is not None:
         workers = n_jobs
@@ -219,7 +292,7 @@ def train_chemprop_classifier(
     parent = Path(outdir)
     outdir = resolve_run_dir(
         parent,
-        ARCHITECTURE,
+        architecture,
         split,
         charge_method=charge_method,
         seed=seed,
@@ -242,9 +315,10 @@ def train_chemprop_classifier(
         split=split,
         seed=seed,
         test_size=test_size,
-        architecture=ARCHITECTURE,
+        architecture=architecture,
         cleaned_hash=prepared.cleaned_hash,
         charge_method=charge_method,
+        foundation=foundation,
         max_epochs=max_epochs,
         batch_size=batch_size,
         hidden_size=hidden_size,
@@ -270,12 +344,18 @@ def train_chemprop_classifier(
         logger.info("Y-scramble: permuted train labels; test labels unchanged")
     fit_labels = cleaned.assign(**{CleanedTrainingData.LABEL: y})
     fit_idx, val_idx = train_val_indices(prepared.train_idx, y, seed=seed)
-    charge_note = f" with {charge_method} charges" if charge_method else ""
-    logger.info(
-        f"Building Chemprop graphs{charge_note} "
-        f"(fit={len(fit_idx)}, val={len(val_idx)}, test={len(prepared.test_idx)}, "
-        f"n_jobs={workers})"
-    )
+    if foundation:
+        logger.info(
+            f"Building Chemprop graphs from foundation={foundation} "
+            f"(fit={len(fit_idx)}, val={len(val_idx)}, test={len(prepared.test_idx)})"
+        )
+    else:
+        charge_note = f" with {charge_method} charges" if charge_method else ""
+        logger.info(
+            f"Building Chemprop graphs{charge_note} "
+            f"(fit={len(fit_idx)}, val={len(val_idx)}, test={len(prepared.test_idx)}, "
+            f"n_jobs={workers})"
+        )
     started = time.perf_counter()
     (train_points, train_kept), (val_points, val_kept), (test_points, test_kept) = (
         _datapoints_for_index_groups(
@@ -335,9 +415,12 @@ def train_chemprop_classifier(
         drop_last=False,
     )
 
-    model = _build_mpnn(
-        featurizer, hidden_size=hidden_size, dropout=dropout, depth=depth
-    )
+    if foundation == FoundationModel.CHEMELEON:
+        model = _build_chemeleon_mpnn(dropout=dropout, hidden_size=hidden_size)
+    else:
+        model = _build_mpnn(
+            featurizer, hidden_size=hidden_size, dropout=dropout, depth=depth
+        )
     lightning_dir = ckpt.outdir / "lightning"
     checkpoint = ModelCheckpoint(
         dirpath=str(lightning_dir / "checkpoints"),
@@ -364,7 +447,10 @@ def train_chemprop_classifier(
         default_root_dir=str(lightning_dir),
         num_sanity_val_steps=0,
     )
-    logger.info("Training Chemprop D-MPNN")
+    logger.info(
+        "Training Chemprop D-MPNN"
+        + (f" (foundation={foundation})" if foundation else "")
+    )
     trainer.fit(model, train_loader, val_loader)
     best_path = checkpoint.best_model_path
     if not best_path:
@@ -396,15 +482,20 @@ def train_chemprop_classifier(
         f"roc_auc={test_metrics.roc_auc:.3f}"
     )
 
+    params = {
+        _PARAMS_HIDDEN: hidden_size,
+        _PARAMS_DROPOUT: dropout,
+        _PARAMS_EXTRA_ATOM_FDIM: extra_atom_fdim(charge_method),
+    }
+    if foundation:
+        params[_PARAMS_FOUNDATION] = foundation
+    else:
+        params[_PARAMS_DEPTH] = depth
     metadata = ModelMeta(
-        architecture=ARCHITECTURE,
+        architecture=architecture,
         charge_method=charge_method,
-        params={
-            _PARAMS_HIDDEN: hidden_size,
-            _PARAMS_DEPTH: depth,
-            _PARAMS_DROPOUT: dropout,
-            _PARAMS_EXTRA_ATOM_FDIM: extra_atom_fdim(charge_method),
-        },
+        foundation=foundation,
+        params=params,
     )
     ckpt.save_json(ckpt.meta_path, metadata)
     report = build_report(
@@ -414,8 +505,9 @@ def train_chemprop_classifier(
         n_train=len(set(train_kept) | set(val_kept)),
         n_test=len(test_kept),
         test_metrics=test_metrics,
-        architecture=ARCHITECTURE,
+        architecture=architecture,
         charge_method=charge_method,
+        foundation=foundation,
         yscramble=yscramble,
     )
     write_report(report, ckpt.report_json_path, ckpt.report_md_path)
